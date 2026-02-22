@@ -1,0 +1,260 @@
+# ============================================================
+# AutoMLOps — Docker Compose  (root: e:\self-healing\)
+# All services wired. Run: docker-compose up -d
+# ============================================================
+
+version: "3.9"
+
+x-common-env: &common-env
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+  POSTGRES_DB: ${POSTGRES_DB:-automlops}
+  POSTGRES_USER: ${POSTGRES_USER:-automlops}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_in_production}
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://automlops:changeme_in_production@postgres:5432/automlops}
+  MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+  MLFLOW_EXPERIMENT_NAME: ${MLFLOW_EXPERIMENT_NAME:-automlops_churn}
+  MLFLOW_MODEL_NAME: ${MLFLOW_MODEL_NAME:-churn_classifier}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  ENV: ${ENV:-development}
+
+services:
+
+  # ── Infrastructure ────────────────────────────────────────
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: automlops_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-automlops}
+      POSTGRES_USER: ${POSTGRES_USER:-automlops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_in_production}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - automlops_network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-automlops}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: automlops_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - automlops_network
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── MLflow ────────────────────────────────────────────────
+
+  mlflow:
+    image: python:3.10-slim
+    container_name: automlops_mlflow
+    restart: unless-stopped
+    command: >
+      bash -c "pip install mlflow psycopg2-binary --quiet &&
+               mlflow server
+               --backend-store-uri postgresql+psycopg2://${POSTGRES_USER:-automlops}:${POSTGRES_PASSWORD:-changeme_in_production}@postgres:5432/${POSTGRES_DB:-automlops}
+               --default-artifact-root /mlruns
+               --host 0.0.0.0
+               --port 5000"
+    environment:
+      <<: *common-env
+    volumes:
+      - mlflow_artifacts:/mlruns
+    ports:
+      - "5000:5000"
+    networks:
+      - automlops_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:5000/health || exit 1" ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Airflow ───────────────────────────────────────────────
+
+  airflow:
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    container_name: automlops_airflow
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-automlops}:${POSTGRES_PASSWORD:-changeme_in_production}@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-change_me_generate_with_fernet_key_generate}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:-change_me_secret_key}
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW_USERNAME: ${AIRFLOW_USERNAME:-admin}
+      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
+    volumes:
+      - ./src/retraining_pipeline/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./src:/opt/airflow/src
+      - ./data:/opt/airflow/data
+      - ./configs:/opt/airflow/configs
+    ports:
+      - "8080:8080"
+    networks:
+      - automlops_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:8080/health || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ── Inference API ─────────────────────────────────────────
+
+  inference_api:
+    build:
+      context: .
+      dockerfile: src/inference_api/Dockerfile
+    container_name: automlops_inference_api
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      INFERENCE_API_HOST: ${INFERENCE_API_HOST:-0.0.0.0}
+      INFERENCE_API_PORT: ${INFERENCE_API_PORT:-8000}
+      INFERENCE_MODEL_STAGE: ${INFERENCE_MODEL_STAGE:-Production}
+      MODEL_LOAD_TIMEOUT_SECONDS: ${MODEL_LOAD_TIMEOUT_SECONDS:-30}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    volumes:
+      - ./src:/app/src
+      - ./configs:/app/configs
+      - mlflow_artifacts:/mlruns
+    ports:
+      - "8000:8000"
+    networks:
+      - automlops_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:8000/health || exit 1" ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Drift Detector ────────────────────────────────────────
+
+  drift_detector:
+    build:
+      context: .
+      dockerfile: src/drift_detector/Dockerfile
+    container_name: automlops_drift_detector
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      DRIFT_REFERENCE_DATA_PATH: ${DRIFT_REFERENCE_DATA_PATH:-/app/data/reference/reference.parquet}
+      DRIFT_WINDOW_SIZE: ${DRIFT_WINDOW_SIZE:-1000}
+      DRIFT_CHECK_INTERVAL_SECONDS: ${DRIFT_CHECK_INTERVAL_SECONDS:-300}
+      DRIFT_SHARE_THRESHOLD: ${DRIFT_SHARE_THRESHOLD:-0.3}
+      DRIFT_PVALUE_THRESHOLD: ${DRIFT_PVALUE_THRESHOLD:-0.05}
+      AIRFLOW_HOST: ${AIRFLOW_HOST:-http://airflow:8080}
+      AIRFLOW_USERNAME: ${AIRFLOW_USERNAME:-admin}
+      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
+      AIRFLOW_RETRAIN_DAG_ID: ${AIRFLOW_RETRAIN_DAG_ID:-retrain_pipeline}
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./configs:/app/configs
+    networks:
+      - automlops_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow:
+        condition: service_healthy
+
+  # ── Monitoring ─────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: automlops_prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - automlops_network
+    healthcheck:
+      test: [ "CMD-SHELL", "wget -qO- http://localhost:9090/-/ready || exit 1" ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: automlops_grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "3000:3000"
+    networks:
+      - automlops_network
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1" ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+# ── Volumes ────────────────────────────────────────────────
+
+volumes:
+  postgres_data:
+  redis_data:
+  mlflow_artifacts:
+  prometheus_data:
+  grafana_data:
+
+    # ── Networks ───────────────────────────────────────────────
+
+networks:
+  automlops_network:
+    driver: bridge
+    name: automlops_network

@@ -1,0 +1,60 @@
+data:
+  raw_path: "data/raw/telco_churn.csv"
+  target_column: "Churn"
+  drop_columns:
+    - "customerID"
+  test_size: 0.2
+  random_state: 42
+  save_reference: true
+  reference_path: "data/reference/reference.parquet"
+
+features:
+  categorical:
+    - "gender"
+    - "Partner"
+    - "Dependents"
+    - "PhoneService"
+    - "MultipleLines"
+    - "InternetService"
+    - "OnlineSecurity"
+    - "OnlineBackup"
+    - "DeviceProtection"
+    - "TechSupport"
+    - "StreamingTV"
+    - "StreamingMovies"
+    - "Contract"
+    - "PaperlessBilling"
+    - "PaymentMethod"
+  numerical:
+    - "tenure"
+    - "MonthlyCharges"
+    - "TotalCharges"
+
+model:
+  type: "xgboost"
+  hyperparameters:
+    n_estimators: 300
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    scale_pos_weight: 3 
+    eval_metric: "logloss"
+    early_stopping_rounds: 20
+    random_state: 42
+
+evaluation:
+  primary_metric: "roc_auc"
+  metrics:
+    - "roc_auc"
+    - "f1"
+    - "precision"
+    - "recall"
+    - "log_loss"
+  threshold: 0.5
+
+mlflow:
+  tags:
+    team: "ml-platform"
+    dataset: "telco_churn"
+    pipeline: "training_service"

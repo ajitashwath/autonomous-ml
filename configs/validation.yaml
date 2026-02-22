@@ -1,0 +1,19 @@
+gate:
+  auc_delta_threshold: 0.005
+  significance_level: 0.05
+
+  require_significance: true
+
+  hard_floors:
+    roc_auc: 0.70
+    f1: 0.55
+    precision: 0.50
+  log_to_db: true
+
+promotion:
+  from_stage: "Staging"
+  to_stage: "Production"
+  archive_old_production: true
+
+rollback:
+  keep_current_on_failure: true

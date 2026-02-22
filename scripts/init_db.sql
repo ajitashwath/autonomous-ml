@@ -1,0 +1,4 @@
+CREATE DATABASE airflow;
+
+GRANT ALL PRIVILEGES ON DATABASE automlops TO automlops;
+GRANT ALL PRIVILEGES ON DATABASE airflow TO automlops;

@@ -1,0 +1,23 @@
+detection:
+  window_size: 1000
+  check_interval_seconds: 300
+  drift_share_threshold: 0.3
+  pvalue_threshold: 0.05
+
+reference:
+  data_path: "data/reference/reference.parquet"
+
+evidently:
+  reports:
+    - "DataDriftPreset"
+    - "DataQualityPreset"
+    - "ClassificationPreset"
+  report_output_dir: "data/drift_reports"
+
+alerting:
+  trigger_airflow: true
+  log_to_db: true
+  critical_features:
+    - "MonthlyCharges"
+    - "tenure"
+    - "Contract"

@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+*.env
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ML Artifacts (managed by MLflow, not git)
+mlruns/
+*.pkl
+*.joblib
+*.parquet
+
+# Data (large files)
+data/raw/*.csv
+data/processed/
+data/reference/
+
+# Airflow
+airflow/logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/settings.json
+.idea/
