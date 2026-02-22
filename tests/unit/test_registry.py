@@ -59,21 +59,15 @@ class TestGetModelInfo:
         registry, client = _make_registry()
         client.get_latest_versions.return_value = []
 
-        from tenacity import RetryError
-        with pytest.raises(RetryError) as exc_info:
+        with pytest.raises(ModelNotFoundError):
             registry.get_model_info(stage=STAGE_PRODUCTION)
-            
-        assert isinstance(exc_info.value.last_attempt.exception(), ModelNotFoundError)
 
     def test_raises_on_client_error(self):
         registry, client = _make_registry()
         client.get_latest_versions.side_effect = Exception("MLflow unreachable")
 
-        from tenacity import RetryError
-        with pytest.raises(RetryError) as exc_info:
+        with pytest.raises(ModelNotFoundError):
             registry.get_model_info(stage=STAGE_PRODUCTION)
-            
-        assert isinstance(exc_info.value.last_attempt.exception(), ModelNotFoundError)
 
 
 # ── Tests: promote_to_production ───────────────────────────────────────────────
@@ -82,10 +76,10 @@ class TestPromoteToProduction:
     def test_calls_transition(self):
         registry, client = _make_registry()
         mv = _make_model_version("5", STAGE_PRODUCTION)
-        # We need two responses because get_model_info is called twice
-        # 1st call: prev_info (returns nothing, so ModelNotFoundError is caught)
-        # 2nd call: info after transition (returns the promoted version mv)
-        client.get_latest_versions.side_effect = [[], [mv]]
+        # We need four responses because get_model_info retries 3 times on the first call
+        # 1st call (3 retries): prev_info (returns [], [], [], then ModelNotFoundError is caught)
+        # 2nd call (1 attempt): info after transition (returns [mv])
+        client.get_latest_versions.side_effect = [[], [], [], [mv]]
         client.get_run.return_value.data.metrics = {"roc_auc": 0.87}
         client.get_run.return_value.data.params = {}
 
@@ -108,11 +102,8 @@ class TestPromoteToProduction:
         client.get_latest_versions.side_effect = [[], [mv]]
         client.transition_model_version_stage.side_effect = Exception("MLflow error")
 
-        from tenacity import RetryError
-        with pytest.raises(RetryError) as exc_info:
+        with pytest.raises(ModelPromotionError):
             registry.promote_to_production(version="5")
-            
-        assert isinstance(exc_info.value.last_attempt.exception(), ModelPromotionError)
 
 
 # ── Tests: rollback ────────────────────────────────────────────────────────────
@@ -129,11 +120,8 @@ class TestRollback:
             [], [], [],  # other stages
         ]
 
-        from tenacity import RetryError
-        with pytest.raises(RetryError) as exc_info:
+        with pytest.raises(ModelRollbackError):
             registry.rollback()
-            
-        assert isinstance(exc_info.value.last_attempt.exception(), ModelRollbackError)
 
 
 # ── Tests: get_model_uri ───────────────────────────────────────────────────────

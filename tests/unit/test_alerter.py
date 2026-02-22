@@ -41,9 +41,5 @@ def test_trigger_retraining_dag_failure_raises():
         
         mock_post.side_effect = httpx.RequestError("Network unreachable")
         
-        from tenacity import RetryError
-        with pytest.raises(RetryError) as exc_info:
+        with pytest.raises(httpx.RequestError):
             trigger_retraining_dag(payload)
-            
-        # Verify the actual error that caused tenacity to fail
-        assert isinstance(exc_info.value.last_attempt.exception(), httpx.RequestError)

@@ -121,7 +121,7 @@ class ModelRegistry:
 
     # ── Read operations ────────────────────────────────────────────────────────
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
     def get_model_info(self, stage: str = STAGE_PRODUCTION) -> ModelInfo:
         """
         Fetch the latest model version in the given stage.
@@ -188,7 +188,7 @@ class ModelRegistry:
 
     # ── Transition operations ──────────────────────────────────────────────────
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
     def register_new_version(self, run_id: str) -> ModelInfo:
         """
         Register a completed training run as a new model version (stage=None).
@@ -214,7 +214,7 @@ class ModelRegistry:
         logger.info("model_version_registered", version=info.version, run_id=run_id)
         return info
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
     def transition_to_staging(self, version: str) -> ModelInfo:
         """
         Move a model version from None → Staging.
@@ -244,7 +244,7 @@ class ModelRegistry:
         logger.info("model_transitioned_to_staging", version=version)
         return info
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
     def promote_to_production(self, version: str, archive_existing: bool = True) -> ModelInfo:
         """
         Promote a Staging model version to Production.
@@ -292,7 +292,7 @@ class ModelRegistry:
         )
         return info
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
     def rollback(self, target_version: Optional[str] = None) -> ModelInfo:
         """
         Roll back Production to a specific version (or the most recent Archived version).

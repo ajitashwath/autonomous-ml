@@ -27,7 +27,7 @@ from src.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
 def trigger_retraining_dag(drift_metrics: dict[str, Any]) -> str | None:
     """
     Trigger the Airflow retraining DAG via REST API.
