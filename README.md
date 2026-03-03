@@ -1,6 +1,6 @@
 # AutoMLOps — Self-Healing ML Platform
 
-AutoMLOps is a production-grade, self-healing Machine Learning platform. It autonomously manages the full ML lifecycle: from training and deployment to monitoring, drift detection, statistical validation, and emergency rollbacks.
+AutoMLOps is a self-healing Machine Learning platform. It autonomously manages the full ML lifecycle: from training and deployment to monitoring, drift detection, statistical validation, and emergency rollbacks.
 
 ## Architecture Highlights
 

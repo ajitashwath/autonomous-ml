@@ -145,3 +145,44 @@ class ErrorResponse(BaseModel):
     error:   str
     detail:  str | None = None
     code:    int
+
+
+# ── Batch prediction models ─────────────────────────────────────────────────────
+
+class BatchPredictionRequest(BaseModel):
+    """
+    Batch prediction request — up to 500 customers in a single call.
+    Predictions are run in one vectorized forward pass.
+    """
+    requests: list[ChurnFeatures] = Field(
+        min_length=1,
+        description="List of customer feature records (1 – BATCH_MAX_SIZE).",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "requests": [
+                    {
+                        "gender": "Female", "SeniorCitizen": 0, "Partner": "Yes",
+                        "Dependents": "No", "tenure": 12, "PhoneService": "Yes",
+                        "MultipleLines": "No", "InternetService": "Fiber optic",
+                        "OnlineSecurity": "No", "OnlineBackup": "Yes",
+                        "DeviceProtection": "No", "TechSupport": "No",
+                        "StreamingTV": "Yes", "StreamingMovies": "No",
+                        "Contract": "Month-to-month", "PaperlessBilling": "Yes",
+                        "PaymentMethod": "Electronic check",
+                        "MonthlyCharges": 75.35, "TotalCharges": 904.20,
+                    }
+                ]
+            }
+        }
+    }
+
+
+class BatchPredictionResponse(BaseModel):
+    """Batch prediction result."""
+    predictions: list[PredictionResponse] = Field(description="Per-request results in input order.")
+    count:        int                       = Field(description="Number of predictions returned.")
+    model_version: str                      = Field(description="Model version used for all predictions.")
+

@@ -17,7 +17,12 @@ evidently:
 alerting:
   trigger_airflow: true
   log_to_db: true
+  # Slack incoming webhook — set to your webhook URL and flip slack_enabled to true.
+  # Override at runtime with the SLACK_WEBHOOK_URL environment variable.
+  slack_enabled: false
+  slack_webhook_url: ""
   critical_features:
     - "MonthlyCharges"
     - "tenure"
     - "Contract"
+

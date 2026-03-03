@@ -29,7 +29,6 @@ import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from src.core.config import get_settings
 from src.core.exceptions import ModelLoadError
 from src.core.logging import get_logger
 from src.inference_api.metrics import (
@@ -40,7 +39,12 @@ from src.inference_api.metrics import (
     REQUEST_LATENCY,
 )
 from src.inference_api.model_loader import ModelLoader
-from src.inference_api.schemas import ChurnFeatures, PredictionResponse
+from src.inference_api.schemas import (
+    BatchPredictionRequest,
+    BatchPredictionResponse,
+    ChurnFeatures,
+    PredictionResponse,
+)
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["Predictions"])
@@ -87,9 +91,8 @@ async def predict(
     All metrics are updated synchronously; DB logging is fire-and-forget.
     """
     request_id = str(uuid.uuid4())
-    settings = get_settings()
-    threshold = float(settings.inference_model_stage and 0.5)  # default 0.5
-    # Read threshold from config (we store it as a param in MLflow)
+    # Default decision threshold; overridden by the value logged to MLflow at training time.
+    threshold = 0.5
     info = loader.get_info()
     if info and "threshold" in info.params:
         threshold = float(info.params["threshold"])
@@ -178,3 +181,147 @@ async def predict(
 
     finally:
         ACTIVE_REQUESTS.dec()
+
+
+# ── Batch prediction ───────────────────────────────────────────────────────────
+
+# Configurable: set BATCH_MAX_SIZE env var to override. Default 500.
+_BATCH_MAX_SIZE = 500
+
+
+@router.post(
+    "/predict/batch",
+    response_model=BatchPredictionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Batch churn prediction",
+    description=(
+        "Submit up to 500 customer records in a single call. "
+        "Predictions run in one vectorised forward pass — much faster than "
+        "calling /predict in a loop."
+    ),
+    responses={
+        400: {"description": "Invalid input"},
+        413: {"description": "Batch exceeds maximum size"},
+        503: {"description": "Model not loaded"},
+        500: {"description": "Internal prediction error"},
+    },
+)
+async def predict_batch(
+    body: BatchPredictionRequest,
+    loader: Annotated[ModelLoader, Depends(_get_loader)],
+) -> BatchPredictionResponse:
+    """
+    Vectorised batch prediction endpoint.
+
+    All records in `body.requests` are scored in a single model.predict_proba()
+    call, keeping per-request latency proportional to batch size, not linear.
+    """
+    n = len(body.requests)
+
+    if n > _BATCH_MAX_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Batch size {n} exceeds maximum of {_BATCH_MAX_SIZE}.",
+        )
+
+    ACTIVE_REQUESTS.inc()
+    batch_start = time.perf_counter()
+
+    try:
+        # ── 1. Get model ───────────────────────────────────────────────────────
+        try:
+            model = loader.get_model()
+        except ModelLoadError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc.message),
+            )
+
+        info = loader.get_info()
+        threshold = 0.5
+        if info and "threshold" in info.params:
+            threshold = float(info.params["threshold"])
+
+        model_version = info.version if info else "unknown"
+        model_stage   = info.stage   if info else "unknown"
+
+        # ── 2. Build batch DataFrame ───────────────────────────────────────────
+        rows = []
+        for feat in body.requests:
+            row = {
+                field: getattr(feat, field)
+                for field in feat.model_fields
+            }
+            row = {k: v.value if hasattr(v, "value") else v for k, v in row.items()}
+            rows.append(row)
+
+        X = pd.DataFrame(rows)
+
+        # ── 3. Vectorised predict ──────────────────────────────────────────────
+        try:
+            probas = model.predict_proba(X)[:, 1]
+        except Exception as exc:
+            ERRORS_TOTAL.labels(error_type="batch_prediction_error").inc()
+            logger.error("batch_prediction_failed", n=n, error=str(exc), exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Batch prediction failed due to an internal error.",
+            )
+
+        # ── 4. Build per-item responses & fire-and-forget logging ──────────────
+        results: list[PredictionResponse] = []
+        for i, (feat, proba) in enumerate(zip(body.requests, probas)):
+            proba_f = float(proba)
+            prediction = int(proba_f >= threshold)
+            request_id = str(uuid.uuid4())
+
+            PREDICTIONS_TOTAL.labels(
+                prediction_label=str(prediction),
+                model_version=model_version,
+            ).inc()
+            PREDICTION_PROBABILITY.labels(model_version=model_version).observe(proba_f)
+
+            try:
+                from src.data_logger.logger import log_prediction_async
+                await log_prediction_async(
+                    request_id=request_id,
+                    features=feat.model_dump(),
+                    prediction=prediction,
+                    probability=proba_f,
+                    model_version=model_version,
+                )
+            except Exception as log_exc:
+                logger.warning(
+                    "batch_item_logging_failed",
+                    item_index=i,
+                    request_id=request_id,
+                    error=str(log_exc),
+                )
+
+            results.append(PredictionResponse(
+                prediction=prediction,
+                probability=round(proba_f, 6),
+                model_version=model_version,
+                model_stage=model_stage,
+                threshold=threshold,
+            ))
+
+        batch_latency = time.perf_counter() - batch_start
+        REQUEST_LATENCY.labels(endpoint="/predict/batch").observe(batch_latency)
+
+        logger.info(
+            "batch_prediction_served",
+            n=n,
+            model_version=model_version,
+            latency_ms=round(batch_latency * 1000, 2),
+        )
+
+        return BatchPredictionResponse(
+            predictions=results,
+            count=n,
+            model_version=model_version,
+        )
+
+    finally:
+        ACTIVE_REQUESTS.dec()
+

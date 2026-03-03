@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: automlops
+  labels:
+    app: mlflow
+    app.kubernetes.io/part-of: automlops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      containers:
+        - name: mlflow
+          image: python:3.10-slim
+          command:
+            - /bin/sh
+            - -c
+            - |
+              pip install mlflow psycopg2-binary --quiet &&
+              mlflow server \
+                --backend-store-uri $(DATABASE_URL) \
+                --default-artifact-root /mlruns \
+                --host 0.0.0.0 \
+                --port 5000
+          ports:
+            - containerPort: 5000
+          envFrom:
+            - secretRef:
+                name: automlops-secrets
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 60
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: mlflow-artifacts
+              mountPath: /mlruns
+      volumes:
+        - name: mlflow-artifacts
+          persistentVolumeClaim:
+            claimName: mlflow-artifacts-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow-service
+  namespace: automlops
+  labels:
+    app: mlflow
+spec:
+  selector:
+    app: mlflow
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlflow-artifacts-pvc
+  namespace: automlops
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: standard
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: automlops-data-pvc
+  namespace: automlops
+spec:
+  accessModes:
+    - ReadWriteMany    # shared between inference-api and drift-detector
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: standard

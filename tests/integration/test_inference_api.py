@@ -135,3 +135,54 @@ class TestPredictEndpoint:
         response = client.get("/metrics")
         assert response.status_code == 200
         assert b"automlops_predictions_total" in response.content
+
+
+# ── Batch predict endpoint ─────────────────────────────────────────────────────
+
+class TestBatchPredictEndpoint:
+    def test_batch_predict_returns_200(self, client):
+        payload = {"requests": [VALID_PAYLOAD, VALID_PAYLOAD]}
+        response = client.post("/api/v1/predict/batch", json=payload)
+        assert response.status_code == 200
+
+    def test_batch_predict_response_count_matches_input(self, client):
+        batch_size = 3
+        payload = {"requests": [VALID_PAYLOAD] * batch_size}
+        response = client.post("/api/v1/predict/batch", json=payload)
+        body = response.json()
+        assert body["count"] == batch_size
+        assert len(body["predictions"]) == batch_size
+
+    def test_batch_predict_response_schema(self, client):
+        payload = {"requests": [VALID_PAYLOAD]}
+        response = client.post("/api/v1/predict/batch", json=payload)
+        body = response.json()
+        assert "predictions" in body
+        assert "count" in body
+        assert "model_version" in body
+        # Each prediction item should match the single-predict schema
+        item = body["predictions"][0]
+        assert "prediction" in item
+        assert "probability" in item
+        assert item["prediction"] in [0, 1]
+        assert 0.0 <= item["probability"] <= 1.0
+
+    def test_batch_predict_rejects_empty_list(self, client):
+        payload = {"requests": []}
+        response = client.post("/api/v1/predict/batch", json=payload)
+        assert response.status_code == 422  # Pydantic min_length=1
+
+    def test_batch_predict_rejects_oversized_batch(self, client):
+        # BATCH_MAX_SIZE is 500; send 501
+        payload = {"requests": [VALID_PAYLOAD] * 501}
+        response = client.post("/api/v1/predict/batch", json=payload)
+        assert response.status_code == 413
+
+    def test_batch_predict_all_churners_when_high_proba(self, client):
+        # The fixture uses proba=0.75 > threshold=0.5 → all predict 1
+        payload = {"requests": [VALID_PAYLOAD, VALID_PAYLOAD, VALID_PAYLOAD]}
+        response = client.post("/api/v1/predict/batch", json=payload)
+        body = response.json()
+        for pred in body["predictions"]:
+            assert pred["prediction"] == 1
+

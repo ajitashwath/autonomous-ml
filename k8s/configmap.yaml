@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: automlops-config
+  namespace: automlops
+data:
+  ENV: "production"
+  LOG_LEVEL: "INFO"
+  MLFLOW_EXPERIMENT_NAME: "automlops_churn"
+  MLFLOW_MODEL_NAME: "churn_classifier"
+  MLFLOW_TRACKING_URI: "http://mlflow-service:5000"
+  INFERENCE_API_HOST: "0.0.0.0"
+  INFERENCE_API_PORT: "8000"
+  INFERENCE_MODEL_STAGE: "Production"
+  MODEL_LOAD_TIMEOUT_SECONDS: "30"
+  REDIS_URL: "redis://redis-service:6379/0"
+  AIRFLOW_HOST: "http://airflow-service:8080"
+  AIRFLOW_RETRAIN_DAG_ID: "retrain_pipeline"
+  DRIFT_WINDOW_SIZE: "1000"
+  DRIFT_CHECK_INTERVAL_SECONDS: "300"
+  DRIFT_SHARE_THRESHOLD: "0.3"
+  DRIFT_REFERENCE_DATA_PATH: "/app/data/reference/reference.parquet"

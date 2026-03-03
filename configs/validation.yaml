@@ -1,7 +1,6 @@
 gate:
   auc_delta_threshold: 0.005
   significance_level: 0.05
-
   require_significance: true
 
   hard_floors:
@@ -9,6 +8,9 @@ gate:
     f1: 0.55
     precision: 0.50
   log_to_db: true
+
+reference:
+  data_path: "data/reference/reference.parquet"
 
 promotion:
   from_stage: "Staging"

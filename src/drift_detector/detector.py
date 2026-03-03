@@ -34,7 +34,7 @@ from sqlalchemy import select
 from src.core.db import db_session
 from src.core.logging import get_logger
 from src.data_logger.models import PredictionLog
-from src.drift_detector.alerter import trigger_retraining_dag
+from src.drift_detector.alerter import send_slack_alert, trigger_retraining_dag
 
 logger = get_logger(__name__)
 
@@ -162,6 +162,17 @@ def run_drift_detection(config_path: str = "configs/drift.yaml") -> None:
                 "report_path": str(report_path),
             }
             trigger_retraining_dag(metrics_payload)
+
+        # Send human-facing Slack notification (best-effort, never crashes detector)
+        send_slack_alert(
+            drift_metrics={
+                "drift_share": drift_share,
+                "drifted_features": drifted_features,
+                "analyzed_rows": len(curr_df_clean),
+                "report_path": str(report_path),
+            },
+            config=config,
+        )
 
 
 if __name__ == "__main__":
