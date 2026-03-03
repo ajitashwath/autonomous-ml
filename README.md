@@ -3,7 +3,6 @@
 AutoMLOps is a self-healing Machine Learning platform. It autonomously manages the full ML lifecycle: from training and deployment to monitoring, drift detection, statistical validation, and emergency rollbacks.
 
 ## Architecture Highlights
-
 - **FastAPI Inference** with zero-downtime background model hot-swapping.
 - **Evidently AI Drift Detection** daemon pulling traffic directly from PostgreSQL.
 - **Event-Driven Airflow DAGs** triggered instantly via REST API upon drift.
