@@ -1,9 +1,7 @@
-# AutoMLOps — Kubernetes Deployment Guide
-
+# Self-Healing — Kubernetes Deployment Guide
 This directory contains Kubernetes manifests for deploying the AutoMLOps platform to a production cluster.
 
 ## Directory Structure
-
 ```
 k8s/
 ├── namespace.yaml                  # automlops namespace
@@ -18,14 +16,12 @@ k8s/
 ```
 
 ## Prerequisites
-
 - Kubernetes 1.25+
 - `kubectl` configured for your target cluster
 - A running PostgreSQL instance accessible from the cluster (or add `k8s/postgres/` separately)
 - Container images built and pushed to your registry
 
 ## Quick Start
-
 ### 1. Build and Push Images
 
 ```bash
@@ -53,7 +49,7 @@ echo -n "my_postgres_password" | base64
 kubectl apply -f k8s/secret.yaml
 ```
 
-> ⚠️ **Never commit `secret.yaml`** — it contains real credentials. It is listed in `.gitignore`.
+> **Never commit `secret.yaml`** — it contains real credentials. It is listed in `.gitignore`.
 
 ### 3. Deploy Everything
 
@@ -104,17 +100,14 @@ Internet/Ingress ──►│   inference-api     │ :8000 (ClusterIP)
 ```
 
 ## Scaling Notes
-
 - **Inference API**: The HPA scales from 3→10 pods at 70% CPU. For GPU workloads, replace with a custom metric on `automlops_active_requests`.
 - **Drift Detector**: Runs as a CronJob with `concurrencyPolicy: Forbid` — at most one detection job runs at a time.
 - **MLflow**: Single replica is sufficient for model registry operations. Add a ReadWriteMany PV if you need HA.
 
 ## Health Checks
-
 All workloads include liveness and readiness probes. The inference API `/health` endpoint is the probe target — it returns 200 only when a model is loaded.
 
 ## Monitoring
-
 Prometheus scraping is enabled via pod annotations on the inference API:
 ```yaml
 prometheus.io/scrape: "true"

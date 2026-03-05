@@ -6,7 +6,6 @@ import structlog
 
 from src.core.config import get_settings
 
-
 def configure_logging() -> None:
     settings = get_settings()
     log_level = getattr(logging, settings.log_level.upper(), logging.INFO)
@@ -30,7 +29,6 @@ def configure_logging() -> None:
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
     ]
-
     if settings.env == "development":
         renderer: Any = structlog.dev.ConsoleRenderer(colors=True)
     else:
@@ -43,7 +41,6 @@ def configure_logging() -> None:
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
-
 
 def get_logger(name: str) -> structlog.BoundLogger:
     return structlog.get_logger(name)

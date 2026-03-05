@@ -1,14 +1,8 @@
-# ============================================================
-# drift_detector/Dockerfile
-# Runs the Evidently AI drift detection daemon.
-# ============================================================
-
 FROM python:3.10-slim
 
 LABEL maintainer="AutoMLOps Team"
 LABEL service="drift_detector"
 
-# System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
@@ -17,7 +11,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python deps
 RUN pip install --no-cache-dir \
     evidently==0.4.19 \
     pandas==2.2.2 \
@@ -33,19 +26,15 @@ RUN pip install --no-cache-dir \
     tenacity==8.3.0 \
     pyarrow==16.0.0
 
-# Copy project source
 COPY src/ /app/src/
 COPY configs/ /app/configs/
 
-# Data mounts (must be able to read reference.parquet and write HTML reports)
 RUN mkdir -p /app/data/reference /app/data/drift_reports
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# Non-root user
 RUN useradd -m -u 1001 appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Entrypoint: Start the daemon loop
 CMD ["python", "-m", "src.drift_detector.detector"]

@@ -4,10 +4,8 @@ import uuid
 from sqlalchemy import JSON, UUID, Boolean, DateTime, Float, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-
 class Base(DeclarativeBase):
     pass
-
 
 class PredictionLog(Base):
     __tablename__ = "prediction_logs"
@@ -17,13 +15,11 @@ class PredictionLog(Base):
         primary_key=True,
         default=uuid.uuid4,
     )
-
     request_id: Mapped[str] = mapped_column(
         String(36),
         index=True,
         doc="API request UUID for tracing end-to-end",
     )
-
     features: Mapped[dict] = mapped_column(
         JSON,
         doc="The raw feature dict received by the API (pre-validation)",
@@ -31,9 +27,7 @@ class PredictionLog(Base):
 
     prediction: Mapped[int] = mapped_column(Integer)
     probability: Mapped[float] = mapped_column(Float)
-
     model_version: Mapped[str] = mapped_column(String(50))
-
     drift_analyzed: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

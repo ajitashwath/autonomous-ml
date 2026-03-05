@@ -7,7 +7,6 @@ from src.data_logger.models import PredictionLog
 
 logger = get_logger(__name__)
 
-
 def log_prediction_sync(request_id: str, features: dict[str, Any], prediction: int, probability: float, model_version: str) -> None:
     try:
         with db_session() as session:

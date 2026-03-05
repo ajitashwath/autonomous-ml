@@ -1,21 +1,3 @@
-"""
-drift_detector/alerter.py
-
-Handles triggering the Airflow retraining DAG and (optionally) a Slack
-notification when drift is detected.
-
-Design decisions:
-  - Airflow trigger: event-driven push via REST API with `tenacity` retries.
-  - Slack notification: config-driven (drift.yaml alerting.slack_webhook_url).
-    Gracefully skipped if not configured — never crashes the detector.
-  - Slack failure is logged at WARNING level only — Airflow trigger is the
-    authoritative action; Slack is best-effort human notification.
-
-Event-Driven Architecture:
-  Instead of Airflow polling the DB on a cron schedule, the detector pushes
-  an event to Airflow the exact second drift crosses the threshold.
-"""
-
 from __future__ import annotations
 
 import json
@@ -30,19 +12,9 @@ from src.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-# ── Airflow trigger ────────────────────────────────────────────────────────────
-
+# Airflow trigger
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
 def trigger_retraining_dag(drift_metrics: dict[str, Any]) -> str | None:
-    """
-    Trigger the Airflow retraining DAG via REST API.
-
-    Args:
-        drift_metrics: JSON-serializable dict of drift stats (e.g., drift_share).
-
-    Returns:
-        The Airflow dag_run_id if successful, None if skipped/failed.
-    """
     settings = get_settings()
 
     url = f"{settings.airflow_host}/api/v1/dags/{settings.airflow_retrain_dag_id}/dagRuns"
@@ -62,7 +34,6 @@ def trigger_retraining_dag(drift_metrics: dict[str, Any]) -> str | None:
         dag_id=settings.airflow_retrain_dag_id,
         url=url,
     )
-
     try:
         response = httpx.post(url, json=payload, auth=auth, timeout=10.0)
         response.raise_for_status()
@@ -81,27 +52,8 @@ def trigger_retraining_dag(drift_metrics: dict[str, Any]) -> str | None:
         raise
 
 
-# ── Slack notification ─────────────────────────────────────────────────────────
-
-def send_slack_alert(
-    drift_metrics: dict[str, Any],
-    config: dict[str, Any],
-) -> None:
-    """
-    Post a drift alert to Slack via an incoming webhook.
-
-    Args:
-        drift_metrics: Same payload passed to Airflow trigger.
-                       Expected keys: drift_share, drifted_features, analyzed_rows,
-                       report_path.
-        config:        The full drift.yaml dict. Slack settings are read from
-                       config["alerting"]["slack_webhook_url"] and
-                       config["alerting"]["slack_enabled"].
-
-    Behaviour:
-        - Silently skips if slack_enabled is False or webhook URL is empty.
-        - Never raises — logs a WARNING on failure so the detector keeps running.
-    """
+# Slack notification 
+def send_slack_alert(drift_metrics: dict[str, Any], config: dict[str, Any]) -> None:
     alerting_cfg = config.get("alerting", {})
 
     if not alerting_cfg.get("slack_enabled", False):
@@ -125,7 +77,7 @@ def send_slack_alert(
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": "🚨 Data Drift Threshold Breached",
+                    "text": "Data Drift Threshold Breached",
                     "emoji": True,
                 },
             },
@@ -147,9 +99,7 @@ def send_slack_alert(
             },
         ],
     }
-
     logger.info("sending_slack_drift_alert", drift_share=drift_share)
-
     try:
         response = httpx.post(
             webhook_url,

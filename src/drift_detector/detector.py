@@ -1,24 +1,3 @@
-"""
-drift_detector/detector.py
-
-Runs periodic drift detection using Evidently AI.
-Compares recent predictions in PostgreSQL against the saved Reference Parquet.
-
-Process:
-  1. Load reference dataset (from training phase).
-  2. Query last N rows from PostgreSQL `prediction_logs` where `drift_analyzed=False`.
-  3. Extract JSON features into a Pandas DataFrame.
-  4. Run Evidently DataDriftPreset.
-  5. Check `drift_share` against threshold.
-  6. If drifted -> call alerter (Airflow trigger).
-  7. Mark rows as `drift_analyzed=True`.
-
-Production notes:
-  - This is designed to be run on a cron schedule (e.g., every 5 mins).
-  - In a massive scale system, this would run against an OLAP DB (ClickHouse),
-    not the primary transactional Postgres DB.
-"""
-
 from __future__ import annotations
 
 import json
@@ -43,12 +22,7 @@ def load_drift_config(config_path: str = "configs/drift.yaml") -> dict[str, Any]
     with open(config_path) as f:
         return yaml.safe_load(f)
 
-
 def fetch_unprocessed_logs(limit: int) -> tuple[pd.DataFrame, list[str]]:
-    """
-    Fetch up to `limit` unanalyzed logs from Postgres.
-    Returns (DataFrame of features, list of log UUIDs).
-    """
     with db_session() as session:
         stmt = (
             select(PredictionLog)
@@ -61,28 +35,23 @@ def fetch_unprocessed_logs(limit: int) -> tuple[pd.DataFrame, list[str]]:
         if not logs:
             return pd.DataFrame(), []
 
-        # Extract features JSON into a list of dicts
         features_list = [log.features for log in logs]
         log_ids = [str(log.id) for log in logs]
 
         df = pd.DataFrame(features_list)
-
-        # Mark as analyzed so we don't process them again on the next run
         for log in logs:
             log.drift_analyzed = True
         session.commit()
-
         return df, log_ids
 
 
 def run_drift_detection(config_path: str = "configs/drift.yaml") -> None:
-    """Main drift detection loop step."""
     logger.info("drift_detection_started")
     config = load_drift_config(config_path)
     det_cfg = config["detection"]
     ref_path = config["reference"]["data_path"]
 
-    # ── 1. Load Reference ──────────────────────────────────────────────────────
+    # Load Reference
     if not Path(ref_path).exists():
         logger.warning(
             "reference_data_not_found",
@@ -93,7 +62,7 @@ def run_drift_detection(config_path: str = "configs/drift.yaml") -> None:
 
     ref_df = pd.read_parquet(ref_path)
 
-    # ── 2. Fetch Live Data ─────────────────────────────────────────────────────
+    # Fetch Live Data
     curr_df, log_ids = fetch_unprocessed_logs(limit=det_cfg["window_size"])
     if curr_df.empty:
         logger.info("no_new_logs_for_drift_analysis")
@@ -116,13 +85,12 @@ def run_drift_detection(config_path: str = "configs/drift.yaml") -> None:
         current_rows=len(curr_df_clean),
     )
 
-    # ── 3. Run Evidently ───────────────────────────────────────────────────────
+    # Run Evidently
     drift_report = Report(metrics=[DataDriftPreset()])
     drift_report.run(reference_data=ref_df_clean, current_data=curr_df_clean)
 
-    # ── 4. Extract metrics & check threshold ───────────────────────────────────
+    # Extract metrics & check threshold
     report_dict = drift_report.as_dict()
-    # Path into Evidently's deeply nested output dict for DataDriftPreset
     try:
         metrics = report_dict["metrics"][0]["result"]
         drift_share = metrics["drift_share"]
@@ -139,15 +107,13 @@ def run_drift_detection(config_path: str = "configs/drift.yaml") -> None:
         drifted_features=drifted_features,
     )
 
-    # ── 5. Trigger Alert if threshold breached ─────────────────────────────────
+    # Trigger Alert if threshold breached
     if drift_share >= det_cfg["drift_share_threshold"]:
         logger.warning(
             "data_drift_detected_threshold_breached",
             drift_share=drift_share,
             threshold=det_cfg["drift_share_threshold"],
         )
-
-        # Save HTML report for human inspection before retraining
         out_dir = Path(config["evidently"]["report_output_dir"])
         out_dir.mkdir(parents=True, exist_ok=True)
         report_path = out_dir / "latest_drift_report.html"
@@ -163,7 +129,7 @@ def run_drift_detection(config_path: str = "configs/drift.yaml") -> None:
             }
             trigger_retraining_dag(metrics_payload)
 
-        # Send human-facing Slack notification (best-effort, never crashes detector)
+        # Send human-facing Slack notification
         send_slack_alert(
             drift_metrics={
                 "drift_share": drift_share,

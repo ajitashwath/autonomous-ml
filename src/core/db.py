@@ -10,7 +10,6 @@ from src.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-
 def build_engine():
     settings = get_settings()
     engine = create_engine(
@@ -21,7 +20,6 @@ def build_engine():
         pool_pre_ping=True, 
         echo=(settings.log_level == "DEBUG"),
     )
-
     if settings.log_level == "DEBUG":
         @event.listens_for(engine, "connect")
         def on_connect(dbapi_conn, connection_record):
@@ -37,10 +35,8 @@ SessionLocal = sessionmaker(
     expire_on_commit=False,
 )
 
-
 class Base(DeclarativeBase):
     pass
-
 
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
@@ -53,7 +49,6 @@ def get_db() -> Generator[Session, None, None]:
         raise DatabaseError(f"Database operation failed: {exc}") from exc
     finally:
         db.close()
-
 
 @contextmanager
 def db_session() -> Generator[Session, None, None]:
@@ -68,7 +63,6 @@ def db_session() -> Generator[Session, None, None]:
     finally:
         db.close()
 
-
 def check_db_connection() -> bool:
     try:
         with engine.connect() as conn:
@@ -77,7 +71,6 @@ def check_db_connection() -> bool:
     except Exception as exc:
         logger.error("db_health_check_failed", error=str(exc))
         return False
-
 
 def create_all_tables() -> None:
     logger.info("creating_db_tables")
