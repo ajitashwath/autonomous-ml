@@ -1,0 +1,2 @@
+time="2026-03-30T01:16:13+05:30" level=warning msg="E:\\self-healing\\docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+unable to get image 'self-healing-drift_detector': error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.51/images/self-healing-drift_detector/json": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.

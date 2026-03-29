@@ -63,7 +63,6 @@ spec:
           lifecycle:
             preStop:
               exec:
-                # Drain in-flight requests before SIGTERM
                 command: ["/bin/sh", "-c", "sleep 5"]
       terminationGracePeriodSeconds: 30
 ---
@@ -111,7 +110,7 @@ spec:
           averageUtilization: 80
   behavior:
     scaleDown:
-      stabilizationWindowSeconds: 300    # wait 5min before scaling down
+      stabilizationWindowSeconds: 300 
       policies:
         - type: Pods
           value: 1

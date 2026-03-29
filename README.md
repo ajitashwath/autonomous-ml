@@ -1,6 +1,5 @@
-# AutoMLOps — Self-Healing ML Platform
-
-AutoMLOps is a self-healing Machine Learning platform. It autonomously manages the full ML lifecycle: from training and deployment to monitoring, drift detection, statistical validation, and emergency rollbacks.
+# Self-Healing ML Platform
+It autonomously manages the full ML lifecycle: from training and deployment to monitoring, drift detection, statistical validation, and emergency rollbacks.
 
 ## Architecture Highlights
 - **FastAPI Inference** with zero-downtime background model hot-swapping.
@@ -16,8 +15,8 @@ The entire platform (PostgreSQL, Redis, MLflow, Airflow, Inference API, Prom/Gra
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/your-org/automlops.git
-cd automlops
+git clone https://github.com/ajitashwath/self-healing.git
+cd self-healing
 
 # 2. Setup environment variables
 cp .env.example .env

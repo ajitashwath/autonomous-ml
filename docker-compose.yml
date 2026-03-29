@@ -1,8 +1,3 @@
-# ============================================================
-# AutoMLOps — Docker Compose  (root: e:\self-healing\)
-# All services wired. Run: docker-compose up -d
-# ============================================================
-
 version: "3.9"
 
 x-common-env: &common-env
@@ -19,9 +14,6 @@ x-common-env: &common-env
   ENV: ${ENV:-development}
 
 services:
-
-  # ── Infrastructure ────────────────────────────────────────
-
   postgres:
     image: postgres:15-alpine
     container_name: automlops_postgres
@@ -60,8 +52,6 @@ services:
       timeout: 5s
       retries: 3
 
-  # ── MLflow ────────────────────────────────────────────────
-
   mlflow:
     image: python:3.10-slim
     container_name: automlops_mlflow
@@ -90,8 +80,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-
-  # ── Airflow ───────────────────────────────────────────────
 
   airflow:
     build:
@@ -129,8 +117,6 @@ services:
       retries: 5
       start_period: 60s
 
-  # ── Inference API ─────────────────────────────────────────
-
   inference_api:
     build:
       context: .
@@ -164,8 +150,6 @@ services:
       retries: 5
       start_period: 20s
 
-  # ── Drift Detector ────────────────────────────────────────
-
   drift_detector:
     build:
       context: .
@@ -194,8 +178,6 @@ services:
         condition: service_healthy
       airflow:
         condition: service_healthy
-
-  # ── Monitoring ─────────────────────────────────────────────
 
   prometheus:
     image: prom/prometheus:latest
@@ -243,8 +225,6 @@ services:
       timeout: 5s
       retries: 3
 
-# ── Volumes ────────────────────────────────────────────────
-
 volumes:
   postgres_data:
   redis_data:
@@ -252,7 +232,6 @@ volumes:
   prometheus_data:
   grafana_data:
 
-    # ── Networks ───────────────────────────────────────────────
 
 networks:
   automlops_network:

@@ -25,11 +25,9 @@ k8s/
 ### 1. Build and Push Images
 
 ```bash
-# Build the images (run from project root)
 docker build -t your-registry/automlops/inference-api:latest   -f src/inference_api/Dockerfile .
 docker build -t your-registry/automlops/drift-detector:latest  -f src/drift_detector/Dockerfile .
 
-# Push to your registry
 docker push your-registry/automlops/inference-api:latest
 docker push your-registry/automlops/drift-detector:latest
 ```
@@ -39,13 +37,10 @@ Update the `image:` fields in the deployment manifests to point to your registry
 ### 2. Create Secrets
 
 ```bash
-# Copy the template
 cp k8s/secret.yaml.template k8s/secret.yaml
 
-# Fill in base64-encoded values, e.g.:
 echo -n "my_postgres_password" | base64
 
-# Apply secrets
 kubectl apply -f k8s/secret.yaml
 ```
 
@@ -54,10 +49,9 @@ kubectl apply -f k8s/secret.yaml
 ### 3. Deploy Everything
 
 ```bash
-# Apply in order (namespace first)
 kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/secret.yaml          # your filled-in copy
+kubectl apply -f k8s/secret.yaml        
 kubectl apply -f k8s/mlflow/
 kubectl apply -f k8s/inference-api/
 kubectl apply -f k8s/drift-detector/
@@ -66,14 +60,11 @@ kubectl apply -f k8s/drift-detector/
 ### 4. Verify
 
 ```bash
-# Check that pods come up healthy
 kubectl get pods -n automlops
 
-# Check inference API readiness
 kubectl port-forward svc/inference-api-service 8000:8000 -n automlops
 curl http://localhost:8000/health
 
-# Check drift detector CronJob
 kubectl get cronjobs -n automlops
 kubectl get jobs -n automlops
 ```

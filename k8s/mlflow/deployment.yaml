@@ -97,7 +97,7 @@ metadata:
   namespace: automlops
 spec:
   accessModes:
-    - ReadWriteMany    # shared between inference-api and drift-detector
+    - ReadWriteMany
   resources:
     requests:
       storage: 5Gi
