@@ -111,7 +111,7 @@ class TestMcNemarGate:
     """Tests for the two-stage McNemar statistical gate."""
 
     @patch("src.validation_gate.gate.load_validation_config")
-    @patch("src.validation_gate.gate._get_predictions_on_reference")
+    @patch("src.validation_gate.gate.get_predictions_on_reference")
     def test_gate_rejects_on_mcnemar_failure(
         self, mock_preds, mock_load_config, mock_registry, mock_deploy_model
     ):
@@ -166,7 +166,7 @@ class TestMcNemarGate:
 
 
     @patch("src.validation_gate.gate.load_validation_config")
-    @patch("src.validation_gate.gate._get_predictions_on_reference")
+    @patch("src.validation_gate.gate.get_predictions_on_reference")
     def test_gate_promotes_when_both_stages_pass(
         self, mock_preds, mock_load_config, mock_registry, mock_deploy_model
     ):
@@ -235,7 +235,7 @@ class TestMcNemarGate:
 
         mock_registry.get_model_info.side_effect = side_effect
 
-        with patch("src.validation_gate.gate._get_predictions_on_reference") as mock_preds:
+        with patch("src.validation_gate.gate.get_predictions_on_reference") as mock_preds:
             validate_and_deploy(config_path="dummy.yaml")
             mock_preds.assert_not_called()
 
