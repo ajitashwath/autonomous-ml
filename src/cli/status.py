@@ -102,7 +102,7 @@ def fetch_recent_logs(n: int = 5) -> list[dict] | str:
         return f"UNAVAILABLE: {exc}"
 
 
-def _fetch_drift_metrics(report_dir: str = "data/drift_reports") -> dict | str:
+def fetch_drift_metrics(report_dir: str = "data/drift_reports") -> dict | str:
     metrics_path = Path(report_dir) / "latest_drift_metrics.json"
     try:
         with open(metrics_path) as f:

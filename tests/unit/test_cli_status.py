@@ -19,7 +19,7 @@ class TestStatusHandlesFailures:
         with patch("src.cli.status.fetch_api_health") as mock_api, \
              patch("src.cli.status.fetch_model_registry") as mock_reg, \
              patch("src.cli.status.fetch_recent_logs") as mock_logs, \
-             patch("src.cli.status._fetch_drift_metrics") as mock_drift:
+             patch("src.cli.status.fetch_drift_metrics") as mock_drift:
 
             mock_api.return_value = {"error": "Connection refused"}
             mock_reg.return_value = {}
@@ -37,7 +37,7 @@ class TestStatusHandlesFailures:
         with patch("src.cli.status.fetch_api_health") as mock_api, \
              patch("src.cli.status.fetch_model_registry") as mock_reg, \
              patch("src.cli.status.fetch_recent_logs") as mock_logs, \
-             patch("src.cli.status._fetch_drift_metrics") as mock_drift:
+             patch("src.cli.status.fetch_drift_metrics") as mock_drift:
 
             mock_api.return_value = {"status": "ok", "model_loaded": False,
                                       "model_version": None, "uptime_seconds": 5.0}
@@ -56,7 +56,7 @@ class TestStatusHandlesFailures:
         with patch("src.cli.status.fetch_api_health") as mock_api, \
              patch("src.cli.status.fetch_model_registry") as mock_reg, \
              patch("src.cli.status.fetch_recent_logs") as mock_logs, \
-             patch("src.cli.status._fetch_drift_metrics") as mock_drift:
+             patch("src.cli.status.fetch_drift_metrics") as mock_drift:
 
             mock_api.return_value = {"status": "ok", "model_loaded": True,
                                       "model_version": "3", "uptime_seconds": 120.0}
@@ -87,7 +87,7 @@ class TestStatusHandlesFailures:
         with patch("src.cli.status.fetch_api_health") as mock_api, \
              patch("src.cli.status.fetch_model_registry") as mock_reg, \
              patch("src.cli.status.fetch_recent_logs") as mock_logs, \
-             patch("src.cli.status._fetch_drift_metrics") as mock_drift:
+             patch("src.cli.status.fetch_drift_metrics") as mock_drift:
 
             mock_api.return_value = {"status": "ok", "model_loaded": True,
                                       "model_version": "1", "uptime_seconds": 0.0}
