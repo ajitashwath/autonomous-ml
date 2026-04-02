@@ -1,4 +1,4 @@
-"""Unit tests for training_service.preprocessor"""
+
 
 import numpy as np
 import pandas as pd
@@ -9,7 +9,6 @@ from src.training_service.preprocessor import build_preprocessor, fit_transform
 
 @pytest.fixture
 def sample_data():
-    """Minimal synthetic dataset matching Telco column schema."""
     rng = np.random.default_rng(0)
     n = 100
     df = pd.DataFrame({
@@ -45,8 +44,6 @@ def test_feature_names_not_empty(sample_data):
 
 
 def test_no_nan_in_output(sample_data):
-    """Preprocessor must produce zero NaN values."""
-    # Inject a NaN
     sample_data.at[0, "MonthlyCharges"] = np.nan
     preprocessor = build_preprocessor(CATEGORICAL, NUMERICAL)
     X_train, X_test = sample_data[:80], sample_data[80:]

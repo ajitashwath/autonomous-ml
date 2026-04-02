@@ -1,9 +1,4 @@
-"""
-Unit tests for the CLI status dashboard.
 
-These tests mock all external sources (MLflow, API, DB) so they run
-without any live infrastructure.
-"""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -12,10 +7,8 @@ import pytest
 
 
 class TestStatusHandlesFailures:
-    """Status tool must never raise — it should degrade gracefully."""
 
     def test_handles_unreachable_api_gracefully(self, capsys):
-        """When the Inference API is unreachable, status should print UNREACHABLE."""
         with patch("src.cli.status.fetch_api_health") as mock_api, \
              patch("src.cli.status.fetch_model_registry") as mock_reg, \
              patch("src.cli.status.fetch_recent_logs") as mock_logs, \
@@ -33,7 +26,6 @@ class TestStatusHandlesFailures:
             assert "UNREACHABLE" in out
 
     def test_handles_no_production_model(self, capsys):
-        """When no Production model exists, None entry should display as 'None registered'."""
         with patch("src.cli.status.fetch_api_health") as mock_api, \
              patch("src.cli.status.fetch_model_registry") as mock_reg, \
              patch("src.cli.status.fetch_recent_logs") as mock_logs, \
@@ -52,7 +44,6 @@ class TestStatusHandlesFailures:
             assert "None registered" in out
 
     def test_handles_drift_data_present(self, capsys):
-        """When drift data is present, drift share should be displayed."""
         with patch("src.cli.status.fetch_api_health") as mock_api, \
              patch("src.cli.status.fetch_model_registry") as mock_reg, \
              patch("src.cli.status.fetch_recent_logs") as mock_logs, \
@@ -83,7 +74,6 @@ class TestStatusHandlesFailures:
             assert "Production" in out
 
     def test_handles_db_error_gracefully(self, capsys):
-        """When DB is unreachable, recent logs section shows UNAVAILABLE message."""
         with patch("src.cli.status.fetch_api_health") as mock_api, \
              patch("src.cli.status.fetch_model_registry") as mock_reg, \
              patch("src.cli.status.fetch_recent_logs") as mock_logs, \

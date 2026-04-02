@@ -1,4 +1,4 @@
-"""Unit tests for training_service.evaluator"""
+
 
 import numpy as np
 import pytest
@@ -36,7 +36,6 @@ def test_perfect_predictions_high_auc(perfect_predictions):
 def test_random_predictions_near_chance(random_predictions):
     y_true, y_proba = random_predictions
     result = evaluate(y_true, y_proba)
-    # Random predictions should be near 0.5 AUC (±0.15 tolerance)
     assert 0.35 < result.roc_auc < 0.65
 
 
@@ -62,9 +61,7 @@ def test_confusion_matrix_sums(perfect_predictions):
 def test_threshold_affects_predictions():
     y_true = np.array([1, 1, 0, 0])
     y_proba = np.array([0.6, 0.6, 0.6, 0.6])
-    # At threshold 0.5, all predicted positive → recall=1, precision=0.5
     result_low = evaluate(y_true, y_proba, threshold=0.5)
-    # At threshold 0.9, all predicted negative → recall=0
     result_high = evaluate(y_true, y_proba, threshold=0.9)
     assert result_low.recall == 1.0
     assert result_high.recall == 0.0

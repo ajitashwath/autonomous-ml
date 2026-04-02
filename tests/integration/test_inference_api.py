@@ -1,7 +1,4 @@
-"""
-Integration tests for inference_api.
-Uses FastAPI TestClient with a mocked ModelLoader — no MLflow server needed.
-"""
+
 
 from __future__ import annotations
 
@@ -14,7 +11,6 @@ from fastapi.testclient import TestClient
 from src.inference_api.main import create_app
 from src.model_registry.registry import ModelInfo
 
-# ── Sample valid request payload ───────────────────────────────────────────────
 VALID_PAYLOAD = {
     "gender": "Female",
     "SeniorCitizen": 0,
@@ -39,7 +35,6 @@ VALID_PAYLOAD = {
 
 
 def _make_mock_loader(proba: float = 0.75) -> MagicMock:
-    """Return a mock ModelLoader that returns a fixed probability."""
     mock_model = MagicMock()
     mock_model.predict_proba.return_value = np.array([[1 - proba, proba]])
 
@@ -62,11 +57,9 @@ def _make_mock_loader(proba: float = 0.75) -> MagicMock:
     return loader
 
 
-# ── Fixtures ───────────────────────────────────────────────────────────────────
 
 @pytest.fixture
 def client():
-    """TestClient with a fully mocked model loader."""
     loader = _make_mock_loader(proba=0.75)
     with patch("src.inference_api.main.get_model_loader", return_value=loader), \
          patch("src.inference_api.main.create_all_tables"), \
@@ -77,7 +70,6 @@ def client():
             yield c
 
 
-# ── Health endpoint ────────────────────────────────────────────────────────────
 
 class TestHealthEndpoint:
     def test_returns_200_when_model_loaded(self, client):
@@ -95,7 +87,6 @@ class TestHealthEndpoint:
             assert key in body, f"Missing key: {key}"
 
 
-# ── Predict endpoint ───────────────────────────────────────────────────────────
 
 class TestPredictEndpoint:
     def test_valid_request_returns_200(self, client):
@@ -112,7 +103,6 @@ class TestPredictEndpoint:
         assert 0.0 <= body["probability"] <= 1.0
 
     def test_high_probability_predicts_churn(self, client):
-        # proba=0.75 > threshold=0.5 → prediction=1
         response = client.post("/api/v1/predict", json=VALID_PAYLOAD)
         assert response.json()["prediction"] == 1
 
@@ -122,7 +112,7 @@ class TestPredictEndpoint:
         assert response.status_code == 422
 
     def test_invalid_enum_value_returns_422(self, client):
-        bad_payload = {**VALID_PAYLOAD, "Contract": "Weekly"}  # not a valid enum
+        bad_payload = {**VALID_PAYLOAD, "Contract": "Weekly"}
         response = client.post("/api/v1/predict", json=bad_payload)
         assert response.status_code == 422
 
@@ -137,7 +127,6 @@ class TestPredictEndpoint:
         assert b"automlops_predictions_total" in response.content
 
 
-# ── Batch predict endpoint ─────────────────────────────────────────────────────
 
 class TestBatchPredictEndpoint:
     def test_batch_predict_returns_200(self, client):
@@ -160,7 +149,6 @@ class TestBatchPredictEndpoint:
         assert "predictions" in body
         assert "count" in body
         assert "model_version" in body
-        # Each prediction item should match the single-predict schema
         item = body["predictions"][0]
         assert "prediction" in item
         assert "probability" in item
@@ -170,19 +158,16 @@ class TestBatchPredictEndpoint:
     def test_batch_predict_rejects_empty_list(self, client):
         payload = {"requests": []}
         response = client.post("/api/v1/predict/batch", json=payload)
-        assert response.status_code == 422  # Pydantic min_length=1
+        assert response.status_code == 422
 
     def test_batch_predict_rejects_oversized_batch(self, client):
-        # BATCH_MAX_SIZE is 500; send 501
         payload = {"requests": [VALID_PAYLOAD] * 501}
         response = client.post("/api/v1/predict/batch", json=payload)
         assert response.status_code == 413
 
     def test_batch_predict_all_churners_when_high_proba(self, client):
-        # The fixture uses proba=0.75 > threshold=0.5 → all predict 1
         payload = {"requests": [VALID_PAYLOAD, VALID_PAYLOAD, VALID_PAYLOAD]}
         response = client.post("/api/v1/predict/batch", json=payload)
         body = response.json()
         for pred in body["predictions"]:
             assert pred["prediction"] == 1
-

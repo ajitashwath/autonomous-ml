@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/part-of: automlops
 spec:
   schedule: "*/5 * * * *"     
-  concurrencyPolicy: Forbid     # never run two drift detections in parallel
+  concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 5
   jobTemplate:
@@ -53,4 +53,4 @@ spec:
                 claimName: automlops-data-pvc
                 readOnly: true
             - name: drift-reports
-              emptyDir: {}      # reports are ephemeral; saved to HTML inside the job
+              emptyDir: {}

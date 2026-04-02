@@ -40,7 +40,6 @@ def row(label: str, value: str, value_colour: str = _RESET) -> None:
     print(f"{_DIM}{label:<24}{_RESET} {value_colour}{value}{_RESET}")
 
 
-# Data fetchers
 def fetch_model_registry() -> dict[str, Any]:
     result: dict[str, Any] = {}
     try:
@@ -113,7 +112,6 @@ def fetch_drift_metrics(report_dir: str = "data/drift_reports") -> dict | str:
         return f"UNAVAILABLE: {exc}"
 
 
-# Display functions
 def show_model_registry(data: dict) -> None:
     header("Model Registry")
     if "error" in data:

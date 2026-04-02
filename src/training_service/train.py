@@ -1,28 +1,4 @@
-"""
-training_service/train.py
 
-CLI entrypoint for the training pipeline.
-
-Usage:
-    python -m src.training_service.train
-    python -m src.training_service.train --config configs/training.yaml
-
-What this script does (in order):
-  1. Load & validate config from training.yaml
-  2. Set up MLflow tracking (experiment + run)
-  3. Load & split raw data (data_loader)
-  4. Fit preprocessor on training split (preprocessor)
-  5. Build + train XGBoost model (model)
-  6. Evaluate on test split (evaluator)
-  7. Log params, metrics, and artifacts to MLflow
-  8. Register the model in MLflow Model Registry (Staging)
-  9. Exit 0 on success, 1 on failure
-
-Production notes:
-  - This is designed to be called by the Airflow retraining DAG (Phase 7).
-  - All config is driven by YAML + env vars — no hardcoded values.
-  - Exit code 1 causes the Airflow task to fail and trigger an alert.
-"""
 
 from __future__ import annotations
 
@@ -52,10 +28,8 @@ configure_logging()
 logger = get_logger(__name__)
 
 
-# ── Config loading ─────────────────────────────────────────────────────────────
 
 def load_training_config(config_path: str) -> dict[str, Any]:
-    """Load and return the training YAML config as a dict."""
     path = Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"Training config not found: {config_path}")
@@ -65,10 +39,8 @@ def load_training_config(config_path: str) -> dict[str, Any]:
     return config
 
 
-# ── MLflow helpers ─────────────────────────────────────────────────────────────
 
 def setup_mlflow(settings: Any, config: dict[str, Any]) -> None:
-    """Set MLflow tracking URI and experiment."""
     mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
     mlflow.set_experiment(settings.mlflow_experiment_name)
     logger.info(
@@ -87,20 +59,14 @@ def log_run(
     model: Any,
     elapsed_seconds: float,
 ) -> str:
-    """
-    Log everything to the active MLflow run and register model.
-    Returns the MLflow run_id.
-    """
     run = mlflow.active_run()
     run_id = run.info.run_id
 
-    # ── Tags ──────────────────────────────────────────────────────────────────
     mlflow.set_tags({
         **config.get("mlflow", {}).get("tags", {}),
         "run_id": run_id,
     })
 
-    # ── Parameters ────────────────────────────────────────────────────────────
     mlflow.log_params(config["model"]["hyperparameters"])
     mlflow.log_param("test_size",      config["data"]["test_size"])
     mlflow.log_param("random_state",   config["data"]["random_state"])
@@ -108,21 +74,17 @@ def log_run(
     mlflow.log_param("threshold",      config["evaluation"]["threshold"])
     mlflow.log_param("training_time_s", round(elapsed_seconds, 2))
 
-    # ── Metrics ───────────────────────────────────────────────────────────────
     mlflow.log_metrics(eval_result.to_dict())
 
-    # ── Artifacts: preprocessor ────────────────────────────────────────────────
     preprocessor_path = "artifacts/preprocessor.pkl"
     save_preprocessor(preprocessor, preprocessor_path)
     mlflow.log_artifact(preprocessor_path, artifact_path="preprocessor")
 
-    # ── Artifacts: feature list ────────────────────────────────────────────────
     features_path = "artifacts/feature_names.txt"
     Path("artifacts").mkdir(exist_ok=True)
     Path(features_path).write_text("\n".join(feature_names))
     mlflow.log_artifact(features_path, artifact_path="preprocessor")
 
-    # ── Model ──────────────────────────────────────────────────────────────────
     mlflow.xgboost.log_model(
         xgb_model=model,
         artifact_path="model",
@@ -133,16 +95,8 @@ def log_run(
     return run_id
 
 
-# ── Main pipeline ──────────────────────────────────────────────────────────────
 
 def run_training_pipeline(config_path: str = "configs/training.yaml") -> None:
-    """
-    Full training pipeline, end to end.
-
-    Raises:
-        AutoMLOpsError: on any recoverable pipeline failure.
-        SystemExit(1):  if training fails fatally.
-    """
     settings = get_settings()
     config = load_training_config(config_path)
 
@@ -157,7 +111,6 @@ def run_training_pipeline(config_path: str = "configs/training.yaml") -> None:
         logger.info("mlflow_run_started", run_id=run.info.run_id)
         start_time = time.time()
 
-        # ── Step 1: Load data ──────────────────────────────────────────────────
         data_split = load_and_split(
             raw_path=data_cfg["raw_path"],
             target_column=data_cfg["target_column"],
@@ -168,7 +121,6 @@ def run_training_pipeline(config_path: str = "configs/training.yaml") -> None:
             reference_path=data_cfg.get("reference_path"),
         )
 
-        # ── Step 2: Preprocess ────────────────────────────────────────────────
         preprocessor = build_preprocessor(
             categorical_features=feat_cfg["categorical"],
             numerical_features=feat_cfg["numerical"],
@@ -177,7 +129,6 @@ def run_training_pipeline(config_path: str = "configs/training.yaml") -> None:
             preprocessor, data_split.X_train, data_split.X_test
         )
 
-        # ── Step 3: Train ─────────────────────────────────────────────────────
         model = build_model(model_cfg["hyperparameters"])
         model = train_model(
             model=model,
@@ -190,7 +141,6 @@ def run_training_pipeline(config_path: str = "configs/training.yaml") -> None:
             ),
         )
 
-        # ── Step 4: Evaluate ──────────────────────────────────────────────────
         y_proba_test = predict_proba(model, X_test_proc)
         eval_result = evaluate(
             y_true=data_split.y_test.values,
@@ -202,7 +152,6 @@ def run_training_pipeline(config_path: str = "configs/training.yaml") -> None:
         logger.info("pipeline_complete", elapsed_seconds=round(elapsed, 2))
         logger.info("evaluation_summary", summary=eval_result.summary())
 
-        # ── Step 5: Log to MLflow ─────────────────────────────────────────────
         run_id = log_run(
             config=config,
             settings=settings,
@@ -221,7 +170,6 @@ def run_training_pipeline(config_path: str = "configs/training.yaml") -> None:
         )
 
 
-# ── CLI entrypoint ─────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AutoMLOps Training Pipeline")

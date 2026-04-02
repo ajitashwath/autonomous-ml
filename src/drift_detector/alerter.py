@@ -12,7 +12,6 @@ from src.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-# Airflow trigger
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
 def trigger_retraining_dag(drift_metrics: dict[str, Any]) -> str | None:
     settings = get_settings()
@@ -20,8 +19,6 @@ def trigger_retraining_dag(drift_metrics: dict[str, Any]) -> str | None:
     url = f"{settings.airflow_host}/api/v1/dags/{settings.airflow_retrain_dag_id}/dagRuns"
     auth = (settings.airflow_username, settings.airflow_password)
 
-    # Pass the drift metrics into the DAG run configuration
-    # The DAG can read this using {{ dag_run.conf }}
     payload = {
         "conf": {
             "trigger_reason": "data_drift_detected",
@@ -52,7 +49,6 @@ def trigger_retraining_dag(drift_metrics: dict[str, Any]) -> str | None:
         raise
 
 
-# Slack notification 
 def send_slack_alert(drift_metrics: dict[str, Any], config: dict[str, Any]) -> None:
     alerting_cfg = config.get("alerting", {})
 

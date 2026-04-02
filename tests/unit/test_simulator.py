@@ -1,4 +1,4 @@
-"""Unit tests for the enhanced drift simulator."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -15,7 +15,6 @@ from src.drift_simulator.simulate import (
 
 @pytest.fixture()
 def reference_df() -> pd.DataFrame:
-    """A small synthetic reference frame matching the Telco schema columns."""
     rng = np.random.default_rng(0)
     n = 20
     return pd.DataFrame({
@@ -56,16 +55,12 @@ class TestMildDrift:
         assert new_mean > original_mean
 
     def test_mild_drift_flips_some_contracts(self, reference_df):
-        # Some rows should be flipped to Month-to-month
         result = _apply_mild_drift(reference_df, np.random.default_rng(42))
-        # Original has 10 Month-to-month out of 20; after mild drift at 30% flip rate,
-        # we just verify the column still exists and at least one is month-to-month
         assert "Contract" in result.columns
         assert (result["Contract"] == "Month-to-month").any()
 
     def test_mild_drift_does_not_invert_original(self, reference_df):
         result = _apply_mild_drift(reference_df, np.random.default_rng(42))
-        # Original should be unchanged
         assert reference_df["MonthlyCharges"].mean() < result["MonthlyCharges"].mean()
 
 
@@ -88,9 +83,8 @@ class TestSevereDrift:
         assert result["tenure"].mean() < reference_df["tenure"].mean()
 
     def test_severe_monthly_charges_clipped_at_199(self, reference_df):
-        # Inject rows that would exceed 199 after ×3
         df = reference_df.copy()
-        df["MonthlyCharges"] = 100.0  # ×3 = 300 → clipped to 199
+        df["MonthlyCharges"] = 100.0
         result = _apply_severe_drift(df, np.random.default_rng(0))
         assert (result["MonthlyCharges"] <= 199.0).all()
 
@@ -101,8 +95,6 @@ class TestSevereDrift:
 
 class TestApplyDriftInterface:
     def test_unknown_level_falls_back_to_no_drift(self, reference_df):
-        """Unknown drift levels should not raise — they default to no-op."""
-        # "none" is the fallback in _DRIFT_FN.get(..., _apply_no_drift)
         result = apply_drift(reference_df, level="none")
         pd.testing.assert_frame_equal(result, reference_df)
 
@@ -114,6 +106,5 @@ class TestApplyDriftInterface:
     def test_different_seeds_produce_different_results(self, reference_df):
         r1 = apply_drift(reference_df, level="mild", seed=1)
         r2 = apply_drift(reference_df, level="mild", seed=2)
-        # Contract column may differ due to random flip mask
         assert not r1["Contract"].equals(r2["Contract"]) or \
                not r1["MonthlyCharges"].equals(r2["MonthlyCharges"])

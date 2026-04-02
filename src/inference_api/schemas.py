@@ -1,18 +1,4 @@
-"""
-inference_api/schemas.py
 
-Pydantic request/response models for the inference API.
-
-Why Pydantic validation here?
-    - Rejects malformed inputs BEFORE they touch the model.
-    - Auto-generates OpenAPI docs at /docs.
-    - Field validators enforce domain rules (e.g. tenure >= 0).
-
-Production note:
-    If the feature set changes (new columns added), update ChurnFeatures
-    and bump the API version (v2). Never silently drop fields—that causes
-    silent mispredictions which are worse than errors.
-"""
 
 from __future__ import annotations
 
@@ -22,7 +8,6 @@ from typing import Annotated
 from pydantic import BaseModel, Field, field_validator
 
 
-# ── Enumerations (match training data values exactly) ─────────────────────────
 
 class GenderEnum(str, Enum):
     male   = "Male"
@@ -65,13 +50,8 @@ class PaymentMethodEnum(str, Enum):
     credit_card      = "Credit card (automatic)"
 
 
-# ── Request model ──────────────────────────────────────────────────────────────
 
 class ChurnFeatures(BaseModel):
-    """
-    Input features for a single churn prediction request.
-    Field names match the Telco dataset columns exactly (after dropping customerID).
-    """
 
     gender:           GenderEnum
     SeniorCitizen:    Annotated[int, Field(ge=0, le=1)]
@@ -120,10 +100,8 @@ class ChurnFeatures(BaseModel):
     }
 
 
-# ── Response models ────────────────────────────────────────────────────────────
 
 class PredictionResponse(BaseModel):
-    """Prediction result returned to the caller."""
     prediction:       int   = Field(description="0 = No churn, 1 = Churn")
     probability:      float = Field(description="Probability of churn (0.0 – 1.0)")
     model_version:    str   = Field(description="MLflow model version used")
@@ -132,7 +110,6 @@ class PredictionResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """Health check response."""
     status:        str
     model_loaded:  bool
     model_version: str | None
@@ -141,19 +118,13 @@ class HealthResponse(BaseModel):
 
 
 class ErrorResponse(BaseModel):
-    """Structured error response — never return raw tracebacks to clients."""
     error:   str
     detail:  str | None = None
     code:    int
 
 
-# ── Batch prediction models ─────────────────────────────────────────────────────
 
 class BatchPredictionRequest(BaseModel):
-    """
-    Batch prediction request — up to 500 customers in a single call.
-    Predictions are run in one vectorized forward pass.
-    """
     requests: list[ChurnFeatures] = Field(
         min_length=1,
         description="List of customer feature records (1 – BATCH_MAX_SIZE).",
@@ -181,8 +152,6 @@ class BatchPredictionRequest(BaseModel):
 
 
 class BatchPredictionResponse(BaseModel):
-    """Batch prediction result."""
     predictions: list[PredictionResponse] = Field(description="Per-request results in input order.")
     count:        int                       = Field(description="Number of predictions returned.")
     model_version: str                      = Field(description="Model version used for all predictions.")
-

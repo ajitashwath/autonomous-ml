@@ -15,7 +15,7 @@ spec:
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1
-      maxUnavailable: 0        # zero-downtime — always keep 3 healthy replicas
+      maxUnavailable: 0
   template:
     metadata:
       labels:

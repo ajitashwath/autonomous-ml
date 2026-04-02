@@ -1,18 +1,4 @@
-"""
-training_service/evaluator.py
 
-Computes all evaluation metrics for a trained model.
-
-Design decisions:
-  - Returns a typed EvaluationResult dataclass — downstream code (MLflow logging,
-    validation_gate) gets named fields, not positional tuple indices.
-  - All metrics are computed with the SAME threshold so comparisons are fair.
-  - Confusion matrix is included because precision/recall alone hide class imbalance.
-
-Production note:
-  - For production models, add calibration plots (Brier score, reliability diagram).
-  - For regulated industries (credit, insurance), add fairness metrics here.
-"""
 
 from __future__ import annotations
 
@@ -35,21 +21,18 @@ logger = get_logger(__name__)
 
 @dataclass
 class EvaluationResult:
-    """Typed container for all model evaluation metrics."""
     roc_auc: float
     f1: float
     precision: float
     recall: float
     log_loss: float
     threshold: float
-    # Confusion matrix quadrants (useful for imbalanced datasets)
     true_negatives: int
     false_positives: int
     false_negatives: int
     true_positives: int
 
     def to_dict(self) -> dict[str, float]:
-        """Flat dict suitable for MLflow log_metrics()."""
         return {k: float(v) for k, v in asdict(self).items()}
 
     def summary(self) -> str:
@@ -65,17 +48,6 @@ def evaluate(
     y_proba: np.ndarray,
     threshold: float = 0.5,
 ) -> EvaluationResult:
-    """
-    Compute all evaluation metrics from true labels and predicted probabilities.
-
-    Args:
-        y_true:    Ground truth binary labels (0 / 1).
-        y_proba:   Predicted probabilities for the positive class.
-        threshold: Decision boundary for converting probabilities to labels.
-
-    Returns:
-        EvaluationResult with all metrics populated.
-    """
     y_pred = (y_proba >= threshold).astype(int)
 
     auc   = roc_auc_score(y_true, y_proba)

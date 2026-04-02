@@ -51,7 +51,6 @@ def run_drift_detection(config_path: str = "configs/drift.yaml") -> None:
     det_cfg = config["detection"]
     ref_path = config["reference"]["data_path"]
 
-    # Load Reference
     if not Path(ref_path).exists():
         logger.warning(
             "reference_data_not_found",
@@ -62,14 +61,11 @@ def run_drift_detection(config_path: str = "configs/drift.yaml") -> None:
 
     ref_df = pd.read_parquet(ref_path)
 
-    # Fetch Live Data
     curr_df, log_ids = fetch_unprocessed_logs(limit=det_cfg["window_size"])
     if curr_df.empty:
         logger.info("no_new_logs_for_drift_analysis")
         return
 
-    # Ensure live dataframe matches reference columns exactly before feeding to Evidently
-    # (Drop columns that might exist in Reference but aren't features, e.g. target)
     curr_features = curr_df.columns.tolist()
     ref_features = [c for c in ref_df.columns if c in curr_features]
     ref_df_clean = ref_df[ref_features]
@@ -85,11 +81,9 @@ def run_drift_detection(config_path: str = "configs/drift.yaml") -> None:
         current_rows=len(curr_df_clean),
     )
 
-    # Run Evidently
     drift_report = Report(metrics=[DataDriftPreset()])
     drift_report.run(reference_data=ref_df_clean, current_data=curr_df_clean)
 
-    # Extract metrics & check threshold
     report_dict = drift_report.as_dict()
     try:
         metrics = report_dict["metrics"][0]["result"]
@@ -107,7 +101,6 @@ def run_drift_detection(config_path: str = "configs/drift.yaml") -> None:
         drifted_features=drifted_features,
     )
 
-    # Trigger Alert if threshold breached
     if drift_share >= det_cfg["drift_share_threshold"]:
         logger.warning(
             "data_drift_detected_threshold_breached",
@@ -129,7 +122,6 @@ def run_drift_detection(config_path: str = "configs/drift.yaml") -> None:
             }
             trigger_retraining_dag(metrics_payload)
 
-        # Send human-facing Slack notification
         send_slack_alert(
             drift_metrics={
                 "drift_share": drift_share,
@@ -142,8 +134,6 @@ def run_drift_detection(config_path: str = "configs/drift.yaml") -> None:
 
 
 if __name__ == "__main__":
-    # In production, this would be wrapped in a while loop with time.sleep(),
-    # or orchestrated by Kubernetes CronJob/Airflow.
     import time
     from src.core.logging import configure_logging
     configure_logging()

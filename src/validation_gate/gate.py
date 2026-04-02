@@ -20,11 +20,7 @@ def load_validation_config(config_path: str) -> dict[str, Any]:
     with open(config_path) as f:
         return yaml.safe_load(f)
 
-# McNemar's test
 def run_mcnemar_test(y_pred_staging: np.ndarray, y_pred_prod: np.ndarray, significance_level: float) -> tuple[float, bool, str]:
-    # Build the 2×2 contingency table
-    # b = staging wrong, prod correct (b counts cases unique to prod's advantage)
-    # c = staging correct, prod wrong (c counts cases unique to staging's advantage)
     b = int(np.sum((y_pred_staging != y_pred_prod) & (y_pred_prod == 1)))
     c = int(np.sum((y_pred_staging != y_pred_prod) & (y_pred_staging == 1)))
     n_discordant = b + c
@@ -35,7 +31,6 @@ def run_mcnemar_test(y_pred_staging: np.ndarray, y_pred_prod: np.ndarray, signif
         )
         return 1.0, True, "skipped (models agree on all samples)"
 
-    # McNemar statistic with continuity correction (Yates):
     chi2_stat = (abs(b - c) - 1.0) ** 2 / (b + c)
     p_value = 1.0 - chi2.cdf(chi2_stat, df=1)
     test_passed = p_value < significance_level
@@ -71,7 +66,6 @@ def get_predictions_on_reference(registry: ModelRegistry, stage: str, reference_
         return None
 
 
-# Main gate logic
 def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
     logger.info("validation_gate_started")
     config = load_validation_config(config_path)
@@ -82,7 +76,6 @@ def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
 
     registry = ModelRegistry()
 
-    # Fetch Staging model
     try:
         staging_info = registry.get_model_info(stage=STAGE_STAGING)
     except ModelNotFoundError:
@@ -116,7 +109,6 @@ def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
         required_improvement=auc_threshold,
     )
 
-    # AUC delta check
     delta = new_auc - prod_auc
     if delta < auc_threshold:
         logger.warning(
@@ -129,7 +121,6 @@ def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
 
     logger.info("stage1_auc_delta_passed", delta=round(delta, 4))
 
-    # McNemar statistical significance test
     if require_significance:
         ref_path = config.get("reference", {}).get(
             "data_path", "data/reference/reference.parquet"

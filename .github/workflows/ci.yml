@@ -9,40 +9,31 @@ on:
 jobs:
   test-and-lint:
     runs-on: ubuntu-latest
-    
-    # We use a matrix to test across multiple Python versions if desired,
-    # but stick to 3.10 as defined in our Dockerfiles.
     strategy:
       matrix:
         python-version: ["3.10"]
 
     steps:
     - uses: actions/checkout@v4
-    
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'
-        
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install pytest pytest-cov
-        
     - name: Lint with Ruff
       run: |
-        # Stop the build if there are Python syntax errors or undefined names
         pip install ruff
         ruff check src/ tests/
-        
     - name: Run Unit Tests with pytest
       env:
         PYTHONPATH: ${{ github.workspace }}
       run: |
         pytest tests/unit/ -v --cov=src --cov-report=xml
-        
     - name: Upload coverage reports to Codecov
       uses: codecov/codecov-action@v4
       with:
@@ -52,18 +43,13 @@ jobs:
         name: codecov-umbrella
 
   docker-build-dry-run:
-    # Ensure Dockerfiles build correctly without pushing to registry
     runs-on: ubuntu-latest
     needs: test-and-lint
-    
     steps:
     - uses: actions/checkout@v4
-    
     - name: Build Inference API Image
       run: docker build -f src/inference_api/Dockerfile -t automlops-inference:test .
-        
     - name: Build Training Service Image
       run: docker build -f src/training_service/Dockerfile -t automlops-trainer:test .
-      
     - name: Build Drift Detector Image
       run: docker build -f src/drift_detector/Dockerfile -t automlops-detector:test .

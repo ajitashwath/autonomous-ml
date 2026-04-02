@@ -1,4 +1,4 @@
-"""Unit tests for model_registry.registry (fully mocked — no MLflow server needed)"""
+
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from src.model_registry.registry import (
 )
 
 
-# ── Fixtures ───────────────────────────────────────────────────────────────────
 
 def _make_model_version(version: str, stage: str, run_id: str = "run-abc") -> MagicMock:
     mv = MagicMock()
@@ -28,7 +27,6 @@ def _make_model_version(version: str, stage: str, run_id: str = "run-abc") -> Ma
 
 
 def _make_registry() -> tuple[ModelRegistry, MagicMock]:
-    """Return a ModelRegistry with a mocked MlflowClient."""
     with patch("src.model_registry.registry.MlflowClient") as MockClient:
         mock_client = MockClient.return_value
         registry = ModelRegistry.__new__(ModelRegistry)
@@ -37,7 +35,6 @@ def _make_registry() -> tuple[ModelRegistry, MagicMock]:
         return registry, mock_client
 
 
-# ── Tests: get_model_info ──────────────────────────────────────────────────────
 
 class TestGetModelInfo:
     def test_returns_model_info(self):
@@ -70,15 +67,11 @@ class TestGetModelInfo:
             registry.get_model_info(stage=STAGE_PRODUCTION)
 
 
-# ── Tests: promote_to_production ───────────────────────────────────────────────
 
 class TestPromoteToProduction:
     def test_calls_transition(self):
         registry, client = _make_registry()
         mv = _make_model_version("5", STAGE_PRODUCTION)
-        # We need four responses because get_model_info retries 3 times on the first call
-        # 1st call (3 retries): prev_info (returns [], [], [], then ModelNotFoundError is caught)
-        # 2nd call (1 attempt): info after transition (returns [mv])
         client.get_latest_versions.side_effect = [[], [], [], [mv]]
         client.get_run.return_value.data.metrics = {"roc_auc": 0.87}
         client.get_run.return_value.data.params = {}
@@ -97,7 +90,6 @@ class TestPromoteToProduction:
 
     def test_raises_on_transition_failure(self):
         registry, client = _make_registry()
-        # Mock finding a staging version, but transition fails
         mv = _make_model_version("5", STAGE_STAGING)
         client.get_latest_versions.side_effect = [[], [mv]]
         client.transition_model_version_stage.side_effect = Exception("MLflow error")
@@ -106,25 +98,21 @@ class TestPromoteToProduction:
             registry.promote_to_production(version="5")
 
 
-# ── Tests: rollback ────────────────────────────────────────────────────────────
 
 class TestRollback:
     def test_raises_when_no_archived_versions(self):
         registry, client = _make_registry()
-        # Current prod exists
         mv_prod = _make_model_version("6", STAGE_PRODUCTION)
-        # No archived versions
         client.get_latest_versions.side_effect = [
-            [mv_prod],   # get Production (to archive it)
-            [],          # getting Archived versions
-            [], [], [],  # other stages
+            [mv_prod],
+            [],
+            [], [], [],
         ]
 
         with pytest.raises(ModelRollbackError):
             registry.rollback()
 
 
-# ── Tests: get_model_uri ───────────────────────────────────────────────────────
 
 class TestGetModelUri:
     def test_uri_format(self):

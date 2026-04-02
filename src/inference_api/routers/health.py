@@ -1,16 +1,4 @@
-"""
-inference_api/routers/health.py
 
-GET /health — liveness and readiness probe.
-
-Docker, Kubernetes, and load balancers hit this endpoint.
-Returns 200 only if the model is loaded and DB is reachable.
-Returns 503 if the model failed to load (container will restart).
-
-Production note:
-    Split into /livez (is process alive?) and /readyz (is model loaded?)
-    for Kubernetes probes. A single /health is fine for Docker setups.
-"""
 
 from __future__ import annotations
 
@@ -28,7 +16,6 @@ from src.inference_api.schemas import HealthResponse
 logger = get_logger(__name__)
 router = APIRouter(tags=["Health"])
 
-# App start time (set in main.py lifespan)
 _start_time: float = time.time()
 
 

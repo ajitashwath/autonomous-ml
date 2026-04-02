@@ -1,22 +1,4 @@
-"""
-training_service/preprocessor.py
 
-Builds a reproducible sklearn preprocessing Pipeline.
-
-Design decisions:
-  - All transformers are wrapped in a single Pipeline so the fitted object
-    can be serialised as one artifact — no risk of train/serve skew.
-  - ColumnTransformer applies different transforms to categorical vs numerical
-    columns declaratively (driven by configs/training.yaml).
-  - We use Pipeline.fit_transform(X_train) then Pipeline.transform(X_test)
-    so test statistics NEVER leak into the fit step.
-
-Production note:
-  - In production this pipeline is saved alongside the model in MLflow so that
-    the inference_api applies the IDENTICAL transformations seen at training time.
-  - Adding new features is as simple as adding them to training.yaml — the
-    pipeline handles them automatically.
-"""
 
 from __future__ import annotations
 
@@ -41,14 +23,6 @@ def build_preprocessor(
     categorical_features: list[str],
     numerical_features: list[str],
 ) -> ColumnTransformer:
-    """
-    Build a ColumnTransformer that:
-      - Numerical columns: median-impute → standard-scale
-      - Categorical columns: constant-impute ("missing") → one-hot encode
-
-    Returns:
-        An unfitted ColumnTransformer (call .fit_transform on X_train).
-    """
     numerical_pipeline = Pipeline(steps=[
         ("imputer", SimpleImputer(strategy="median")),
         ("scaler", StandardScaler()),
@@ -59,9 +33,9 @@ def build_preprocessor(
         (
             "encoder",
             OneHotEncoder(
-                handle_unknown="ignore",    # gracefully handles unseen categories at serve time
-                sparse_output=False,        # return dense array for compatibility
-                drop="first",               # avoid multicollinearity
+                handle_unknown="ignore",
+                sparse_output=False,
+                drop="first",
             ),
         ),
     ])
@@ -71,7 +45,7 @@ def build_preprocessor(
             ("numerical", numerical_pipeline, numerical_features),
             ("categorical", categorical_pipeline, categorical_features),
         ],
-        remainder="drop",       # drop any column not explicitly listed
+        remainder="drop",
         verbose_feature_names_out=False,
     )
 
@@ -88,13 +62,6 @@ def fit_transform(
     X_train: pd.DataFrame,
     X_test: pd.DataFrame,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """
-    Fit the preprocessor on X_train, then transform both splits.
-    Returns dense numpy arrays + the final feature names list.
-
-    Raises:
-        DataValidationError: if X_train is missing columns the preprocessor expects.
-    """
     logger.info("fitting_preprocessor", n_train=len(X_train))
     try:
         X_train_processed = preprocessor.fit_transform(X_train)
@@ -122,7 +89,6 @@ def fit_transform(
 
 
 def save_preprocessor(preprocessor: ColumnTransformer, path: str) -> None:
-    """Persist the fitted preprocessor to disk (used by inference_api)."""
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as f:
@@ -131,7 +97,6 @@ def save_preprocessor(preprocessor: ColumnTransformer, path: str) -> None:
 
 
 def load_preprocessor(path: str) -> ColumnTransformer:
-    """Load a previously saved preprocessor from disk."""
     in_path = Path(path)
     if not in_path.exists():
         raise FileNotFoundError(f"Preprocessor not found at: {path}")

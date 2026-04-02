@@ -1,30 +1,4 @@
-"""
-inference_api/main.py
 
-FastAPI application factory with lifespan management.
-
-Lifespan (startup/shutdown):
-    STARTUP:
-      1. Configure logging
-      2. Create DB tables (PredictionLog, etc.)
-      3. Load Production model from MLflow (blocking — fail fast)
-      4. Start background hot-swap polling thread
-
-    SHUTDOWN:
-      1. Stop polling thread gracefully
-      2. SQLAlchemy connection pool closes automatically
-
-Endpoints:
-    GET  /health    — liveness + readiness probe
-    POST /predict   — churn prediction
-    GET  /metrics   — Prometheus metrics (scraped by prometheus container)
-
-Production notes:
-    - gunicorn + uvicorn workers in prod (not bare uvicorn).
-      Command: gunicorn main:app -k uvicorn.workers.UvicornWorker -w 4
-    - Add rate limiting middleware (slowapi) before going public.
-    - CORS is intentionally not added — inference APIs are internal services.
-"""
 
 from __future__ import annotations
 
@@ -47,27 +21,19 @@ configure_logging()
 logger = get_logger(__name__)
 settings = get_settings()
 
-# ── App startup time (used by /health) ─────────────────────────────────────────
 _start_time = time.time()
 
 
-# ── Lifespan ───────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """
-    FastAPI lifespan context manager.
-    Everything before `yield` runs on startup; everything after on shutdown.
-    """
     logger.info("inference_api_starting", env=settings.env)
 
-    # 1. Create DB tables (idempotent — safe to run on every startup)
     try:
         create_all_tables()
     except Exception as exc:
         logger.warning("db_table_creation_failed", error=str(exc))
 
-    # 2. Load model (BLOCKING — container stays unhealthy until this succeeds)
     loader: ModelLoader = get_model_loader()
     try:
         loader.load()
@@ -77,28 +43,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             error=exc.message,
             details=exc.details,
         )
-        # In development, continue with a degraded API (health returns 503).
-        # In production, you may want to raise here to force a container restart.
         if settings.env == "production":
             raise
 
-    # 3. Store loader on app state (accessed by route dependencies)
     app.state.model_loader = loader
     app.state.start_time   = _start_time
 
-    # 4. Start background hot-swap thread
     loader.start_polling()
     logger.info("inference_api_ready")
 
-    yield  # ← API is live here
+    yield
 
-    # ── Shutdown ───────────────────────────────────────────────────────────────
     logger.info("inference_api_shutting_down")
     loader.stop_polling()
     logger.info("inference_api_shutdown_complete")
 
 
-# ── App factory ────────────────────────────────────────────────────────────────
 
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -114,16 +74,12 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
 
-    # ── Routers ────────────────────────────────────────────────────────────────
     app.include_router(health.router)
     app.include_router(predict.router, prefix="/api/v1")
 
-    # ── Prometheus metrics endpoint ────────────────────────────────────────────
-    # Mounts the prometheus_client ASGI app at /metrics
     metrics_app = make_asgi_app()
     app.mount("/metrics", metrics_app)
 
-    # ── Global exception handlers ──────────────────────────────────────────────
     @app.exception_handler(AutoMLOpsError)
     async def automlops_error_handler(request: Request, exc: AutoMLOpsError) -> JSONResponse:
         logger.error(
@@ -150,7 +106,6 @@ def create_app() -> FastAPI:
             content={"error": "Internal server error", "code": 500},
         )
 
-    # ── Middleware: request logging ─────────────────────────────────────────────
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
         start = time.perf_counter()
@@ -171,7 +126,6 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
-# ── CLI entrypoint ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
