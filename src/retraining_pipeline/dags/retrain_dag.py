@@ -16,7 +16,7 @@ default_args = {
 }
 
 with DAG(
-    dag_id="retrain_churn_model",
+    dag_id="retrain_pipeline",
     default_args=default_args,
     description="Triggered by data drift to retrain, validate, and promote the churn model.",
     schedule_interval=None,

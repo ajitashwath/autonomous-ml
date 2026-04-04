@@ -74,5 +74,9 @@ def check_db_connection() -> bool:
 
 def create_all_tables() -> None:
     logger.info("creating_db_tables")
-    Base.metadata.create_all(bind=engine)
+    # Import the data_logger Base that has PredictionLog registered.
+    # core/db.py's own Base has no models attached, so we must use the one
+    # from data_logger.models to ensure the prediction_logs table gets created.
+    from src.data_logger.models import Base as DataLoggerBase  # noqa: PLC0415
+    DataLoggerBase.metadata.create_all(bind=engine)
     logger.info("db_tables_created")

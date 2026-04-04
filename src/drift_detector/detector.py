@@ -101,34 +101,40 @@ def run_drift_detection(config_path: str = "configs/drift.yaml") -> None:
         drifted_features=drifted_features,
     )
 
+    # Always persist the latest metrics so the status CLI can read them.
+    out_dir = Path(config["evidently"]["report_output_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    metrics_payload = {
+        "drift_share": drift_share,
+        "dataset_drift": dataset_drift,
+        "drifted_features": drifted_features,
+        "analyzed_rows": len(curr_df_clean),
+        "report_path": str(out_dir / "latest_drift_report.html"),
+    }
+    metrics_json_path = out_dir / "latest_drift_metrics.json"
+    with open(metrics_json_path, "w") as f:
+        json.dump(metrics_payload, f, indent=2)
+    logger.info("drift_metrics_json_saved", path=str(metrics_json_path))
+
     if drift_share >= det_cfg["drift_share_threshold"]:
         logger.warning(
             "data_drift_detected_threshold_breached",
             drift_share=drift_share,
             threshold=det_cfg["drift_share_threshold"],
         )
-        out_dir = Path(config["evidently"]["report_output_dir"])
-        out_dir.mkdir(parents=True, exist_ok=True)
         report_path = out_dir / "latest_drift_report.html"
         drift_report.save_html(str(report_path))
         logger.info("drift_html_report_saved", path=str(report_path))
+        # Update the report_path in the persisted JSON now that the HTML exists.
+        metrics_payload["report_path"] = str(report_path)
+        with open(metrics_json_path, "w") as f:
+            json.dump(metrics_payload, f, indent=2)
 
         if config["alerting"]["trigger_airflow"]:
-            metrics_payload = {
-                "drift_share": drift_share,
-                "drifted_features": drifted_features,
-                "analyzed_rows": len(curr_df_clean),
-                "report_path": str(report_path),
-            }
             trigger_retraining_dag(metrics_payload)
 
         send_slack_alert(
-            drift_metrics={
-                "drift_share": drift_share,
-                "drifted_features": drifted_features,
-                "analyzed_rows": len(curr_df_clean),
-                "report_path": str(report_path),
-            },
+            drift_metrics=metrics_payload,
             config=config,
         )
 

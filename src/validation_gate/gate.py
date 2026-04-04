@@ -33,12 +33,21 @@ def run_mcnemar_test(y_pred_staging: np.ndarray, y_pred_prod: np.ndarray, signif
 
     chi2_stat = (abs(b - c) - 1.0) ** 2 / (b + c)
     p_value = 1.0 - chi2.cdf(chi2_stat, df=1)
-    test_passed = p_value < significance_level
-    reason = (
-        f"p={p_value:.4f} < α={significance_level} → significant improvement"
-        if test_passed
-        else f"p={p_value:.4f} ≥ α={significance_level} → improvement not statistically significant"
-    )
+    staging_is_better = c > b  # staging fixes more of prod's mistakes than vice versa
+    test_passed = p_value < significance_level and staging_is_better
+    if p_value >= significance_level:
+        reason = (
+            f"p={p_value:.4f} ≥ α={significance_level} → improvement not statistically significant"
+        )
+    elif not staging_is_better:
+        reason = (
+            f"p={p_value:.4f} < α={significance_level} but staging is not directionally better "
+            f"(b={b} prod-correct-staging-wrong, c={c} staging-correct-prod-wrong; need c > b)"
+        )
+    else:
+        reason = (
+            f"p={p_value:.4f} < α={significance_level} and c={c} > b={b} → significant improvement"
+        )
     logger.info(
         "mcnemar_test_complete",
         b=b,
@@ -46,6 +55,7 @@ def run_mcnemar_test(y_pred_staging: np.ndarray, y_pred_prod: np.ndarray, signif
         chi2_stat=round(chi2_stat, 4),
         p_value=round(p_value, 4),
         significance_level=significance_level,
+        staging_is_better=staging_is_better,
         test_passed=test_passed,
     )
     return p_value, test_passed, reason

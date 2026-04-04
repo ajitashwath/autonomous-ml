@@ -17,11 +17,24 @@ def execute_rollback(reason: str, target_version: Optional[str] = None) -> None:
     logger.warning("emergency_rollback_initiated", reason=reason, target=target_version or "latest_archived")
     registry = ModelRegistry()
     try:
-        restored_version, demoted_version = registry.rollback(target_version=target_version)
-        registry.annotate_version(
-            version=demoted_version,
-            description=f"[ROLLED-BACK] Reason: {reason}"
-        )
+        # Capture the current production version before rolling back — this is
+        # what will be demoted/archived by registry.rollback().
+        from src.core.exceptions import ModelNotFoundError
+        try:
+            current_prod = registry.get_model_info()
+            demoted_version: Optional[str] = current_prod.version
+        except ModelNotFoundError:
+            demoted_version = None
+
+        # rollback() returns a single ModelInfo for the newly-restored model.
+        restored_info = registry.rollback(target_version=target_version)
+        restored_version = restored_info.version
+
+        if demoted_version:
+            registry.annotate_version(
+                version=demoted_version,
+                description=f"[ROLLED-BACK] Reason: {reason}"
+            )
         registry.annotate_version(
             version=restored_version,
             description=f"[RESTORED-TO-PROD] Emergency rollback replacement."

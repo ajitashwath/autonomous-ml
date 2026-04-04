@@ -14,7 +14,7 @@ def test_trigger_retraining_dag_success():
     with patch("src.drift_detector.alerter.httpx.post") as mock_post, \
          patch("src.drift_detector.alerter.get_settings") as mock_settings:
         mock_settings.return_value.airflow_host = "http://airflow:8080"
-        mock_settings.return_value.airflow_retrain_dag_id = "retrain_churn_model"
+        mock_settings.return_value.airflow_retrain_dag_id = "retrain_pipeline"
         mock_settings.return_value.airflow_username = "admin"
         mock_settings.return_value.airflow_password = "admin"
         mock_resp = MagicMock()

@@ -32,6 +32,7 @@ def col(text: str, colour: str) -> str:
 
 def header(title: str) -> None:
     width = 60
+    bar = "─" * width
     print(f"\n{_BOLD}{_CYAN}{bar}{_RESET}")
     print(f"{_BOLD}{_CYAN}  {title}{_RESET}")
     print(f"{_BOLD}{_CYAN}{bar}{_RESET}")

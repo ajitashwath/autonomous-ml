@@ -196,3 +196,52 @@ class TestMcNemarGate:
             mock_preds.assert_not_called()
 
         mock_deploy_model.assert_called_once()
+
+
+class TestMcNemarDirectional:
+    """Directly test run_mcnemar_test for the directional (c > b) requirement."""
+
+    from src.validation_gate.gate import run_mcnemar_test as _run
+
+    def test_rejects_when_staging_worse_than_prod(self):
+        """Even if p < alpha, staging that makes more mistakes than prod should fail."""
+        from src.validation_gate.gate import run_mcnemar_test
+        import numpy as np
+        # staging is worse: mostly wrong where prod is right
+        # b (prod correct, staging wrong) >> c (staging correct, prod wrong)
+        n = 200
+        # prod correct on all, staging wrong on all → b=n, c=0
+        staging_preds = np.zeros(n, dtype=int)   # all wrong
+        prod_preds    = np.ones(n, dtype=int)     # all correct (discordant pairs)
+        p_value, test_passed, reason = run_mcnemar_test(
+            staging_preds, prod_preds, significance_level=0.05
+        )
+        assert not test_passed, "Should reject: staging is worse than prod (b >> c)"
+        assert "directionally" in reason or "need c > b" in reason
+
+    def test_rejects_when_equally_anticorrelated(self):
+        """With c == b (perfectly anticorrelated), staging is not better — reject."""
+        from src.validation_gate.gate import run_mcnemar_test
+        import numpy as np
+        n = 100
+        staging_preds = np.array([1, 0] * (n // 2))
+        prod_preds    = np.array([0, 1] * (n // 2))
+        p_value, test_passed, reason = run_mcnemar_test(
+            staging_preds, prod_preds, significance_level=0.05
+        )
+        # c == b == 50, so staging_is_better is False
+        assert not test_passed, "Should reject: equal errors, staging not directionally better"
+
+    def test_passes_when_staging_clearly_better(self):
+        """A large c >> b with significant p-value should pass."""
+        from src.validation_gate.gate import run_mcnemar_test
+        import numpy as np
+        rng = np.random.default_rng(0)
+        n = 1000
+        # staging correct everywhere, prod random → c >> b
+        staging_preds = np.ones(n, dtype=int)
+        prod_preds    = rng.integers(0, 2, size=n)
+        p_value, test_passed, reason = run_mcnemar_test(
+            staging_preds, prod_preds, significance_level=0.05
+        )
+        assert test_passed, f"Should pass: staging clearly better. reason={reason}"

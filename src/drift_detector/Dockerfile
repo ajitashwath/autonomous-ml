@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 RUN pip install --no-cache-dir \
-    evidently==0.4.19 \
+    evidently==0.4.30 \
     pandas==2.2.2 \
     numpy==1.26.4 \
     scikit-learn==1.4.2 \

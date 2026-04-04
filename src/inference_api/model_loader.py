@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import pickle
+import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 import mlflow
+import mlflow.artifacts
 import mlflow.xgboost
 import xgboost as xgb
+from sklearn.compose import ColumnTransformer
 
 from src.core.config import get_settings
 from src.core.exceptions import ModelLoadError, ModelNotFoundError
@@ -25,6 +30,7 @@ class ModelLoader:
 
     def __init__(self) -> None:
         self._model: Optional[xgb.XGBClassifier] = None
+        self._preprocessor: Optional[ColumnTransformer] = None
         self._info:  Optional[ModelInfo] = None
         self._lock   = threading.RLock()
         self._registry = ModelRegistry()
@@ -56,8 +62,11 @@ class ModelLoader:
                 details={"model_uri": model_uri, "version": info.version},
             ) from exc
 
+        preprocessor = self._load_preprocessor(info.run_id)
+
         with self._lock:
             self._model = model
+            self._preprocessor = preprocessor
             self._info  = info
 
         MODEL_INFO.labels(
@@ -104,8 +113,11 @@ class ModelLoader:
             MODEL_LOAD_TOTAL.labels(status="failure").inc()
             return
 
+        new_preprocessor = self._load_preprocessor(latest_info.run_id)
+
         with self._lock:
             self._model = new_model
+            self._preprocessor = new_preprocessor
             self._info  = latest_info
 
         MODEL_INFO.labels(
@@ -146,9 +158,38 @@ class ModelLoader:
         with self._lock:
             return self._info
 
+    def get_preprocessor(self) -> Optional[ColumnTransformer]:
+        with self._lock:
+            return self._preprocessor
+
     def is_loaded(self) -> bool:
         with self._lock:
             return self._model is not None
+
+    def _load_preprocessor(self, run_id: str) -> Optional[ColumnTransformer]:
+        """Download the fitted preprocessor artifact from MLflow.
+        Returns None with a warning if the artifact is absent (e.g. old runs)."""
+        artifact_path = "preprocessor/preprocessor.pkl"
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                local_path = mlflow.artifacts.download_artifacts(
+                    run_id=run_id,
+                    artifact_path=artifact_path,
+                    dst_path=tmp_dir,
+                )
+                with open(local_path, "rb") as f:
+                    preprocessor = pickle.load(f)
+            logger.info("preprocessor_loaded", run_id=run_id)
+            return preprocessor
+        except Exception as exc:
+            logger.warning(
+                "preprocessor_artifact_not_found",
+                run_id=run_id,
+                artifact_path=artifact_path,
+                error=str(exc),
+                action="Inference will pass raw features to the model — predictions may be incorrect.",
+            )
+            return None
 
 
 _loader: Optional[ModelLoader] = None

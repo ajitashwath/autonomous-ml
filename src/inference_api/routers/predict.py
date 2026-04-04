@@ -81,6 +81,26 @@ async def predict(
 
         X = _features_to_dataframe(features)
 
+        # Apply the fitted preprocessor (impute + scale + OHE) before inference.
+        # If no preprocessor artifact was found at load time, fall back to raw
+        # features and rely on the warning already logged by the model loader.
+        preprocessor = loader.get_preprocessor()
+        if preprocessor is not None:
+            try:
+                X = preprocessor.transform(X)
+            except Exception as exc:
+                ERRORS_TOTAL.labels(error_type="preprocessing_error").inc()
+                logger.error(
+                    "preprocessing_failed",
+                    request_id=request_id,
+                    error=str(exc),
+                    exc_info=True,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Feature preprocessing failed.",
+                )
+
         try:
             proba = float(model.predict_proba(X)[0, 1])
         except Exception as exc:
@@ -208,6 +228,19 @@ async def predict_batch(
             rows.append(row)
 
         X = pd.DataFrame(rows)
+
+        # Apply the fitted preprocessor before batch inference.
+        preprocessor = loader.get_preprocessor()
+        if preprocessor is not None:
+            try:
+                X = preprocessor.transform(X)
+            except Exception as exc:
+                ERRORS_TOTAL.labels(error_type="batch_preprocessing_error").inc()
+                logger.error("batch_preprocessing_failed", n=n, error=str(exc), exc_info=True)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Batch feature preprocessing failed.",
+                )
 
         try:
             probas = model.predict_proba(X)[:, 1]
