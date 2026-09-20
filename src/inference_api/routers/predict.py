@@ -151,6 +151,7 @@ def predict(
         )
 
         return PredictionResponse(
+            request_id=request_id,
             prediction=prediction,
             probability=round(proba, 6),
             model_version=info.version,
@@ -222,8 +223,10 @@ def predict_batch(
             ).inc()
             PREDICTION_PROBABILITY.labels(model_version=info.version).observe(proba_f)
 
-            records.append(_record(str(uuid.uuid4()), feat, prediction, proba_f, info.version))
+            item_request_id = str(uuid.uuid4())
+            records.append(_record(item_request_id, feat, prediction, proba_f, info.version))
             results.append(PredictionResponse(
+                request_id=item_request_id,
                 prediction=prediction,
                 probability=round(proba_f, 6),
                 model_version=info.version,

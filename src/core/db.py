@@ -1,7 +1,7 @@
 from collections.abc import Generator
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from src.core.config import get_settings
@@ -72,6 +72,48 @@ def check_db_connection() -> bool:
         logger.error("db_health_check_failed", error=str(exc))
         return False
 
+def add_missing_columns(bind, metadata) -> list[str]:
+    """Add nullable columns that exist in the models but not yet in the database.
+
+    `create_all()` only creates missing *tables*; it never alters an existing one, so a
+    column added to a model later would be missing from any database created before it.
+    Idempotent. Only nullable columns are handled, because adding a NOT NULL column with
+    no default to a populated table would fail. Returns the "table.column" names added.
+    """
+    added: list[str] = []
+    inspector = inspect(bind)
+    preparer = bind.dialect.identifier_preparer
+    with bind.begin() as conn:
+        for table in metadata.sorted_tables:
+            if not inspector.has_table(table.name):
+                continue
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing:
+                    continue
+                if not column.nullable:
+                    logger.warning(
+                        "column_missing_but_not_nullable_needs_manual_migration",
+                        table=table.name,
+                        column=column.name,
+                    )
+                    continue
+                col_type = column.type.compile(dialect=bind.dialect)
+                conn.execute(text(
+                    f"ALTER TABLE {preparer.quote(table.name)} "
+                    f"ADD COLUMN {preparer.quote(column.name)} {col_type}"
+                ))
+                if column.index:
+                    index_name = f"ix_{table.name}_{column.name}"
+                    conn.execute(text(
+                        f"CREATE INDEX IF NOT EXISTS {preparer.quote(index_name)} "
+                        f"ON {preparer.quote(table.name)} ({preparer.quote(column.name)})"
+                    ))
+                added.append(f"{table.name}.{column.name}")
+                logger.info("db_column_added", table=table.name, column=column.name)
+    return added
+
+
 def create_all_tables() -> None:
     logger.info("creating_db_tables")
     # Import the data_logger Base that has PredictionLog registered.
@@ -79,4 +121,5 @@ def create_all_tables() -> None:
     # from data_logger.models to ensure the prediction_logs table gets created.
     from src.data_logger.models import Base as DataLoggerBase  # noqa: PLC0415
     DataLoggerBase.metadata.create_all(bind=engine)
+    add_missing_columns(engine, DataLoggerBase.metadata)
     logger.info("db_tables_created")

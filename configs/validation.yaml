@@ -10,7 +10,11 @@ gate:
   log_to_db: true
 
 evaluation:
-  # Labelled data (raw features + target) both models are scored on.
+  # Labelled data (raw features + target) both models are scored on. Recent production
+  # outcomes are preferred when there are enough of them; otherwise the static holdout
+  # carved out of the original CSV is used.
+  production_holdout_path: "data/reference/production_holdout.parquet"
+  min_production_holdout_rows: 50
   holdout_path: "data/reference/holdout.parquet"
   target_column: "Churn"
 

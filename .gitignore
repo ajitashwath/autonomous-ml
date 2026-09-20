@@ -23,10 +23,12 @@ mlruns/
 *.joblib
 *.parquet
 
-# Data (large files)
+# Data (large files) and generated output — the Evidently HTML report alone is ~3.5 MB and
+# once made GitHub classify this repo as 94% HTML.
 data/raw/*.csv
 data/processed/
 data/reference/
+data/drift_reports/
 
 # Airflow
 airflow/logs/

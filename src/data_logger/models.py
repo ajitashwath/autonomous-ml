@@ -42,5 +42,18 @@ class PredictionLog(Base):
         index=True,
     )
 
+    # Ground truth arrives later (POST /api/v1/labels); NULL until then. Rows with a label
+    # are what retraining and the validation gate learn from and are scored on.
+    actual_label: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        index=True,
+        doc="Real outcome (0 = stayed, 1 = churned) once known",
+    )
+    label_received_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     def __repr__(self) -> str:
         return f"<PredictionLog {self.request_id} -> {self.prediction}>"

@@ -281,3 +281,117 @@ class TestEventLoopIsNotBlocked:
         assert health.status_code == 200
         # Blocked on the event loop this cannot happen before all three predictions (~0.9s) finish.
         assert health_answered_after < self.DELAY
+
+
+class TestRequestIds:
+    """Clients need the id back to report the real outcome later."""
+
+    def test_single_prediction_returns_the_id_it_logged(self, client, logged):
+        body = client.post("/api/v1/predict", json=VALID_PAYLOAD).json()
+
+        (records,), _ = logged.call_args
+        assert body["request_id"] == records[0]["request_id"]
+
+    def test_batch_items_each_get_a_unique_id_matching_their_log_record(self, client, logged):
+        body = client.post("/api/v1/predict/batch", json={"requests": [CHURN_PAYLOAD] * 3}).json()
+
+        ids = [p["request_id"] for p in body["predictions"]]
+        (records,), _ = logged.call_args
+        assert len(set(ids)) == 3
+        assert ids == [r["request_id"] for r in records]
+
+
+class TestLabelsEndpoint:
+    @pytest.fixture
+    def stack(self, snapshot, sqlite_db):
+        """Real logging + label storage against SQLite; only the loader is stubbed."""
+        with patch("src.data_logger.logger.db_session", sqlite_db.session), \
+             patch("src.data_logger.labels.db_session", sqlite_db.session), \
+             _serving(_loader_for(snapshot)) as c:
+            yield c, sqlite_db
+
+    def _predict(self, c, payload=CHURN_PAYLOAD) -> str:
+        return c.post("/api/v1/predict", json=payload).json()["request_id"]
+
+    def test_full_loop_predict_then_report_the_outcome(self, stack):
+        c, db = stack
+        request_id = self._predict(c)
+
+        response = c.post("/api/v1/labels", json={"labels": [{"request_id": request_id, "actual_label": 1}]})
+
+        assert response.status_code == 200
+        assert response.json() == {"received": 1, "updated": 1, "unknown_request_ids": []}
+        row = db.rows()[request_id]
+        assert row.actual_label == 1
+        assert row.prediction == 1
+
+    def test_labelled_predictions_become_training_data(self, stack):
+        """The point of the endpoint: what clients report is what retraining sees."""
+        from src.training_service.feedback import fetch_labelled_rows
+
+        c, db = stack
+        churn_id = self._predict(c, CHURN_PAYLOAD)
+        stay_id = self._predict(c, NO_CHURN_PAYLOAD)
+        self._predict(c, CHURN_PAYLOAD)  # never labelled
+        c.post("/api/v1/labels", json={"labels": [
+            {"request_id": churn_id, "actual_label": 1},
+            {"request_id": stay_id, "actual_label": 0},
+        ]})
+
+        with patch("src.core.db.db_session", db.session):
+            rows = fetch_labelled_rows("Churn")
+
+        assert len(rows) == 2
+        assert sorted(rows["Churn"]) == [0, 1]
+        assert set(CHURN_PAYLOAD) <= set(rows.columns)   # full raw features are available
+
+    def test_unknown_request_ids_are_reported(self, stack):
+        c, _ = stack
+        known = self._predict(c)
+
+        body = c.post("/api/v1/labels", json={"labels": [
+            {"request_id": known, "actual_label": 1},
+            {"request_id": "not-a-real-id", "actual_label": 0},
+        ]}).json()
+
+        assert (body["received"], body["updated"]) == (2, 1)
+        assert body["unknown_request_ids"] == ["not-a-real-id"]
+
+    def test_accuracy_metric_counts_correct_and_incorrect_predictions(self, stack):
+        from src.inference_api.metrics import LABELS_TOTAL
+
+        c, _ = stack
+        # All three are predicted churn (1). Two turn out right, one wrong: unequal on purpose
+        # so that swapped counters would be detected.
+        right_1, right_2, wrong = self._predict(c), self._predict(c), self._predict(c)
+        correct_before = LABELS_TOTAL.labels(outcome="correct")._value.get()
+        incorrect_before = LABELS_TOTAL.labels(outcome="incorrect")._value.get()
+
+        c.post("/api/v1/labels", json={"labels": [
+            {"request_id": right_1, "actual_label": 1},
+            {"request_id": right_2, "actual_label": 1},
+            {"request_id": wrong, "actual_label": 0},
+        ]})
+
+        assert LABELS_TOTAL.labels(outcome="correct")._value.get() == correct_before + 2
+        assert LABELS_TOTAL.labels(outcome="incorrect")._value.get() == incorrect_before + 1
+
+    @pytest.mark.parametrize("bad_label", [2, -1, "yes", None])
+    def test_labels_must_be_zero_or_one(self, stack, bad_label):
+        c, _ = stack
+        response = c.post("/api/v1/labels", json={"labels": [{"request_id": "x", "actual_label": bad_label}]})
+        assert response.status_code == 422
+
+    def test_empty_and_oversized_requests_are_rejected(self, stack):
+        c, _ = stack
+        assert c.post("/api/v1/labels", json={"labels": []}).status_code == 422
+        too_many = [{"request_id": str(i), "actual_label": 0} for i in range(1001)]
+        assert c.post("/api/v1/labels", json={"labels": too_many}).status_code == 422
+
+    def test_database_outage_is_a_503_not_a_crash(self, client):
+        from src.core.exceptions import DatabaseError
+
+        with patch("src.inference_api.routers.labels.record_labels", side_effect=DatabaseError("down")):
+            response = client.post("/api/v1/labels", json={"labels": [{"request_id": "x", "actual_label": 1}]})
+
+        assert response.status_code == 503

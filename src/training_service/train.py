@@ -18,6 +18,7 @@ from src.core.logging import configure_logging, get_logger
 from src.model_registry.registry import ModelInfo, ModelRegistry
 from src.training_service.data_loader import load_and_split
 from src.training_service.evaluator import evaluate
+from src.training_service.feedback import load_feedback
 from src.training_service.model import build_model, predict_proba, train_model
 from src.training_service.preprocessor import (
     build_preprocessor,
@@ -59,6 +60,7 @@ def log_run(
     preprocessor: Any,
     model: Any,
     elapsed_seconds: float,
+    extra_params: dict[str, Any] | None = None,
 ) -> str:
     run = mlflow.active_run()
     run_id = run.info.run_id
@@ -74,6 +76,8 @@ def log_run(
     mlflow.log_param("n_features",     len(feature_names))
     mlflow.log_param("threshold",      config["evaluation"]["threshold"])
     mlflow.log_param("training_time_s", round(elapsed_seconds, 2))
+    if extra_params:
+        mlflow.log_params(extra_params)
 
     mlflow.log_metrics(eval_result.to_dict())
 
@@ -118,6 +122,9 @@ def run_training_pipeline(config_path: str = "configs/training.yaml") -> None:
         logger.info("mlflow_run_started", run_id=run.info.run_id)
         start_time = time.time()
 
+        feedback_cfg = config.get("feedback", {})
+        feedback = load_feedback(feedback_cfg, target_column=data_cfg["target_column"])
+
         data_split = load_and_split(
             raw_path=data_cfg["raw_path"],
             target_column=data_cfg["target_column"],
@@ -127,6 +134,8 @@ def run_training_pipeline(config_path: str = "configs/training.yaml") -> None:
             save_reference=data_cfg.get("save_reference", True),
             reference_path=data_cfg.get("reference_path"),
             holdout_path=data_cfg.get("holdout_path"),
+            feedback=feedback,
+            production_holdout_path=feedback_cfg.get("production_holdout_path"),
         )
 
         preprocessor = build_preprocessor(
@@ -168,6 +177,10 @@ def run_training_pipeline(config_path: str = "configs/training.yaml") -> None:
             preprocessor=preprocessor,
             model=model,
             elapsed_seconds=elapsed,
+            extra_params={
+                "n_feedback_train_rows": data_split.n_feedback_train,
+                "n_feedback_eval_rows": data_split.n_feedback_eval,
+            },
         )
 
         staged = register_and_stage(run_id)

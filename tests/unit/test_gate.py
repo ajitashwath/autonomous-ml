@@ -172,7 +172,11 @@ def _noisy_proba(y: np.ndarray, error_rate: float, seed: int) -> np.ndarray:
 def _gate_config(path, **gate) -> dict:
     return {
         "gate": {"auc_delta_threshold": 0.0, "require_significance": True, **gate},
-        "evaluation": {"holdout_path": str(path), "target_column": "Churn"},
+        "evaluation": {
+            "holdout_path": str(path),
+            "production_holdout_path": str(path.parent / "no_production_holdout.parquet"),
+            "target_column": "Churn",
+        },
     }
 
 
@@ -342,3 +346,95 @@ class TestMcNemar:
     def test_rejects_mismatched_lengths(self):
         with pytest.raises(ValidationGateError):
             run_mcnemar_test(np.zeros(3), np.zeros(3), np.zeros(4), 0.05)
+
+
+# --------------------------------------------------------------------------- #
+# Choosing the evaluation set: recent production outcomes vs the static holdout
+# --------------------------------------------------------------------------- #
+
+def _write_holdout(path, n, classes=(0, 1)):
+    rng = np.random.default_rng(1)
+    y = np.resize(np.array(classes), n)
+    pd.DataFrame({"tenure": rng.integers(1, 72, size=n), "Churn": y}).to_parquet(path, index=False)
+    return y
+
+
+def _two_path_config(prod_path, static_path, **gate) -> dict:
+    return {
+        "gate": {"auc_delta_threshold": 0.0, "require_significance": True, **gate},
+        "evaluation": {
+            "production_holdout_path": str(prod_path),
+            "min_production_holdout_rows": 50,
+            "holdout_path": str(static_path),
+            "target_column": "Churn",
+        },
+    }
+
+
+class TestEvaluationSetSelection:
+    def _run(self, config, registry, seen):
+        _serve(registry, _info("2", 0.0), _info("1", 0.0))
+
+        def score(_registry, info, X):
+            seen.append(len(X))
+            y = np.resize(np.array([0, 1]), len(X))
+            return _noisy_proba(y, 0.05 if info.version == "2" else 0.30, int(info.version))
+
+        with patch("src.validation_gate.gate.load_validation_config", return_value=config), \
+             patch("src.validation_gate.gate.score_model", score):
+            validate_and_deploy(config_path="dummy.yaml")
+
+    def test_recent_production_outcomes_are_preferred(self, mock_registry, mock_deploy_model, tmp_path):
+        prod, static = tmp_path / "prod.parquet", tmp_path / "static.parquet"
+        _write_holdout(prod, 120)
+        _write_holdout(static, 300)
+        seen: list[int] = []
+
+        self._run(_two_path_config(prod, static), mock_registry, seen)
+
+        assert seen == [120, 120]            # both models scored on the production slice
+        mock_deploy_model.assert_called_once()
+
+    def test_too_few_production_rows_fall_back_to_the_static_holdout(
+        self, mock_registry, mock_deploy_model, tmp_path
+    ):
+        prod, static = tmp_path / "prod.parquet", tmp_path / "static.parquet"
+        _write_holdout(prod, 20)
+        _write_holdout(static, 300)
+        seen: list[int] = []
+
+        self._run(_two_path_config(prod, static), mock_registry, seen)
+
+        assert seen == [300, 300]
+
+    def test_single_class_production_slice_is_not_usable(self, mock_registry, mock_deploy_model, tmp_path):
+        """AUC and McNemar are undefined without both classes."""
+        prod, static = tmp_path / "prod.parquet", tmp_path / "static.parquet"
+        _write_holdout(prod, 120, classes=(1,))
+        _write_holdout(static, 300)
+        seen: list[int] = []
+
+        self._run(_two_path_config(prod, static), mock_registry, seen)
+
+        assert seen == [300, 300]
+
+    def test_static_holdout_used_when_no_production_file_exists(
+        self, mock_registry, mock_deploy_model, tmp_path
+    ):
+        static = tmp_path / "static.parquet"
+        _write_holdout(static, 300)
+        seen: list[int] = []
+
+        self._run(_two_path_config(tmp_path / "missing.parquet", static), mock_registry, seen)
+
+        assert seen == [300, 300]
+
+    def test_fails_closed_when_neither_set_exists(self, mock_registry, mock_deploy_model, tmp_path):
+        config = _two_path_config(tmp_path / "a.parquet", tmp_path / "b.parquet")
+        _serve(mock_registry, _info("2", 0.9), _info("1", 0.85))
+
+        with patch("src.validation_gate.gate.load_validation_config", return_value=config), \
+             pytest.raises(ValidationGateError):
+            validate_and_deploy(config_path="dummy.yaml")
+
+        mock_deploy_model.assert_not_called()

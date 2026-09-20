@@ -104,6 +104,7 @@ class PredictionResponse(BaseModel):
     # `model_*` field names are part of the public API; silence pydantic's reserved-prefix warning.
     model_config = ConfigDict(protected_namespaces=())
 
+    request_id:       str   = Field(description="Send this back to POST /api/v1/labels with the real outcome")
     prediction:       int   = Field(description="0 = No churn, 1 = Churn")
     probability:      float = Field(description="Probability of churn (0.0 – 1.0)")
     model_version:    str   = Field(description="MLflow model version used")
@@ -153,6 +154,21 @@ class BatchPredictionRequest(BaseModel):
             }
         }
     }
+
+
+class LabelItem(BaseModel):
+    request_id: str = Field(min_length=1, max_length=36, description="request_id from a prediction response")
+    actual_label: int = Field(ge=0, le=1, description="What actually happened: 0 = stayed, 1 = churned")
+
+
+class LabelRequest(BaseModel):
+    labels: list[LabelItem] = Field(min_length=1, max_length=1000)
+
+
+class LabelResponse(BaseModel):
+    received: int = Field(description="Labels in the request")
+    updated: int = Field(description="Labels attached to a logged prediction")
+    unknown_request_ids: list[str] = Field(description="request_ids that were never logged (ignored)")
 
 
 class BatchPredictionResponse(BaseModel):

@@ -15,7 +15,7 @@ from src.core.db import create_all_tables
 from src.core.exceptions import AutoMLOpsError, ModelLoadError
 from src.core.logging import configure_logging, get_logger
 from src.inference_api.model_loader import ModelLoader, get_model_loader
-from src.inference_api.routers import health, predict
+from src.inference_api.routers import health, labels, predict
 
 configure_logging()
 logger = get_logger(__name__)
@@ -76,6 +76,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(predict.router, prefix="/api/v1")
+    app.include_router(labels.router, prefix="/api/v1")
 
     metrics_app = make_asgi_app()
     app.mount("/metrics", metrics_app)

@@ -46,3 +46,9 @@ MODEL_INFO = Gauge(
     documentation="Currently loaded model metadata (always 1 if model is loaded)",
     labelnames=["model_version", "model_stage"],
 )
+
+LABELS_TOTAL = Counter(
+    name="automlops_labels_total",
+    documentation="Ground-truth labels received, by whether the served prediction was right",
+    labelnames=["outcome"],
+)

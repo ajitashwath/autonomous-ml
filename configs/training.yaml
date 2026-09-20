@@ -9,6 +9,15 @@ data:
   reference_path: "data/reference/reference.parquet"
   holdout_path: "data/reference/holdout.parquet"
 
+# Learn from real production outcomes (reported via POST /api/v1/labels), not just the CSV.
+feedback:
+  enabled: true
+  # Below this many labelled rows the run trains on the CSV alone.
+  min_labelled_rows: 300
+  # Newest fraction of labelled rows is held out (never trained on) for the validation gate.
+  eval_fraction: 0.3
+  production_holdout_path: "data/reference/production_holdout.parquet"
+
 features:
   categorical:
     - "gender"

@@ -63,3 +63,64 @@ def _no_retry_backoff(monkeypatch):
         "promote_to_production",
     ):
         monkeypatch.setattr(getattr(ModelRegistry, name).retry, "wait", wait_none())
+
+
+class SqliteDb:
+    """In-memory prediction_logs database plus a drop-in replacement for `db_session`."""
+
+    def __init__(self):
+        from contextlib import contextmanager
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+
+        from src.data_logger.models import Base
+
+        self.engine = create_engine(
+            "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+        )
+        Base.metadata.create_all(self.engine)
+        self.factory = sessionmaker(bind=self.engine, expire_on_commit=False)
+
+        @contextmanager
+        def session():
+            s = self.factory()
+            try:
+                yield s
+                s.commit()
+            except Exception:
+                s.rollback()
+                raise
+            finally:
+                s.close()
+
+        self.session = session
+
+    def add_prediction(self, request_id: str, features: dict, prediction: int = 0,
+                       actual_label: int | None = None, created_at=None, version: str = "1"):
+        import uuid
+
+        from src.data_logger.models import PredictionLog
+
+        with self.factory() as s:
+            row = PredictionLog(
+                id=uuid.uuid4(), request_id=request_id, features=features,
+                prediction=prediction, probability=0.5, model_version=version,
+                actual_label=actual_label,
+            )
+            if created_at is not None:
+                row.created_at = created_at
+            s.add(row)
+            s.commit()
+
+    def rows(self):
+        from src.data_logger.models import PredictionLog
+
+        with self.factory() as s:
+            return {r.request_id: r for r in s.query(PredictionLog).all()}
+
+
+@pytest.fixture()
+def sqlite_db():
+    return SqliteDb()

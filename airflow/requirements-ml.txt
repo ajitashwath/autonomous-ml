@@ -1,7 +1,10 @@
 # Dependencies for the ML tasks the retrain DAG runs (train, validation gate, deploy).
 # Installed into an isolated virtualenv (see airflow/Dockerfile) because Airflow 2.9 pins
 # SQLAlchemy<2.0, while the application code is written for SQLAlchemy 2.x.
-# These tasks need no database driver: MLflow is reached over HTTP.
+# MLflow is reached over HTTP; the database driver is for reading labelled production
+# predictions (feedback) when retraining.
+sqlalchemy==2.0.30
+psycopg2-binary==2.9.9
 scikit-learn==1.4.2
 xgboost==2.0.3
 pandas==2.2.2

@@ -27,6 +27,8 @@ logger = get_logger(__name__)
 # so the exact (binomial) form of McNemar's test is used instead.
 EXACT_TEST_MAX_DISCORDANT = 25
 
+DEFAULT_MIN_PRODUCTION_ROWS = 50
+
 PREPROCESSOR_ARTIFACT = "preprocessor/preprocessor.pkl"
 
 
@@ -141,6 +143,41 @@ def load_holdout(path: str, target_column: str) -> tuple[pd.DataFrame, np.ndarra
     return df.drop(columns=[target_column]), y
 
 
+def load_evaluation_set(
+    eval_cfg: dict[str, Any],
+) -> tuple[pd.DataFrame, np.ndarray, str] | None:
+    """The labelled data candidates are scored on, plus a name for logging.
+
+    Real, recent production outcomes are preferred over the static holdout carved out of the
+    original CSV: they reflect the distribution the model is actually serving. They are only
+    used when there are enough rows and both classes are present, since AUC and McNemar's
+    test are meaningless otherwise.
+    """
+    target_column = eval_cfg.get("target_column", "Churn")
+
+    production_path = eval_cfg.get("production_holdout_path")
+    if production_path:
+        min_rows = eval_cfg.get("min_production_holdout_rows", DEFAULT_MIN_PRODUCTION_ROWS)
+        production = load_holdout(production_path, target_column)
+        if production is not None:
+            X, y = production
+            if len(y) >= min_rows and len(set(y.tolist())) == 2:
+                return X, y, "production_holdout"
+            logger.warning(
+                "production_holdout_unusable_falling_back",
+                rows=len(y),
+                required=min_rows,
+                classes=sorted(set(y.tolist())),
+            )
+
+    static = load_holdout(
+        eval_cfg.get("holdout_path", "data/reference/holdout.parquet"), target_column
+    )
+    if static is None:
+        return None
+    return static[0], static[1], "static_holdout"
+
+
 def score_model(registry: ModelRegistry, info: ModelInfo, X: pd.DataFrame) -> np.ndarray:
     """Churn probabilities for raw features, using the model *and* its own preprocessor.
 
@@ -177,7 +214,6 @@ def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
     hard_floors = gate_cfg.get("hard_floors", {}) or {}
     eval_cfg = config.get("evaluation", {})
     holdout_path = eval_cfg.get("holdout_path", "data/reference/holdout.parquet")
-    target_column = eval_cfg.get("target_column", "Churn")
 
     registry = ModelRegistry()
 
@@ -209,10 +245,11 @@ def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
         promote_model(registry, staging_info.version, "First deployment (auto-promoted)")
         return
 
-    holdout = load_holdout(holdout_path, target_column)
+    evaluation = load_evaluation_set(eval_cfg)
     y_pred_staging = y_pred_prod = y_true = None
+    evaluated_on = "logged_metrics"
 
-    if holdout is None:
+    if evaluation is None:
         if require_significance:
             raise ValidationGateError(
                 "Holdout data is required for the significance test but was not found; "
@@ -226,7 +263,7 @@ def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
             promote_model(registry, staging_info.version, "Forced promotion (Prod AUC missing)")
             return
     else:
-        X_holdout, y_true = holdout
+        X_holdout, y_true, evaluated_on = evaluation
         proba_staging = score_model(registry, staging_info, X_holdout)
         proba_prod = score_model(registry, prod_info, X_holdout)
         # Both models are compared on the same labelled samples, not on whatever
@@ -243,7 +280,8 @@ def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
         staging_version=staging_info.version,
         staging_auc=round(new_auc, 4),
         required_improvement=auc_threshold,
-        evaluated_on="holdout" if holdout is not None else "logged_metrics",
+        evaluated_on=evaluated_on,
+        evaluation_rows=None if y_true is None else len(y_true),
     )
 
     delta = new_auc - prod_auc

@@ -10,6 +10,7 @@ from sklearn.model_selection import train_test_split
 
 from src.core.exceptions import DataLoadError, DataValidationError
 from src.core.logging import get_logger
+from src.training_service.feedback import FeedbackData
 
 logger = get_logger(__name__)
 
@@ -34,6 +35,8 @@ class DataSplit:
     n_train: int
     n_test: int
     class_balance: dict[str, float]
+    n_feedback_train: int = 0
+    n_feedback_eval: int = 0
 
 
 def _validate_schema(df: pd.DataFrame) -> None:
@@ -80,6 +83,8 @@ def load_and_split(
     save_reference: bool = True,
     reference_path: str | None = None,
     holdout_path: str | None = None,
+    feedback: FeedbackData | None = None,
+    production_holdout_path: str | None = None,
 ) -> DataSplit:
     path = Path(raw_path)
     if not path.exists():
@@ -107,6 +112,32 @@ def load_and_split(
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, random_state=random_state, stratify=y
     )
+
+    n_feedback_train = n_feedback_eval = 0
+    if feedback is not None:
+        # Older labelled production rows join the *training* side only. The newest ones are
+        # kept out entirely (see below) so the gate can score models on data they never saw.
+        missing = set(X_train.columns) - set(feedback.train.columns)
+        if missing:
+            raise DataValidationError(
+                f"Labelled production rows are missing feature columns: {sorted(missing)}",
+                details={"missing_columns": sorted(missing)},
+            )
+        X_train = pd.concat(
+            [X_train.reset_index(drop=True), feedback.train[list(X_train.columns)]],
+            ignore_index=True,
+        )
+        y_train = pd.concat(
+            [y_train.reset_index(drop=True), feedback.train[target_column].astype(int)],
+            ignore_index=True,
+        )
+        n_feedback_train = len(feedback.train)
+        n_feedback_eval = len(feedback.evaluation)
+        logger.info(
+            "feedback_rows_added_to_training",
+            train_rows=n_feedback_train,
+            held_out_rows=n_feedback_eval,
+        )
 
     class_balance = {
         "churn_rate_train": float(y_train.mean()),
@@ -137,6 +168,16 @@ def load_and_split(
         hold_df.to_parquet(hold_path, index=False)
         logger.info("holdout_data_saved", path=str(hold_path), rows=len(hold_df))
 
+    if production_holdout_path:
+        prod_path = Path(production_holdout_path)
+        if feedback is not None:
+            prod_path.parent.mkdir(parents=True, exist_ok=True)
+            feedback.evaluation.to_parquet(prod_path, index=False)
+            logger.info("production_holdout_saved", path=str(prod_path), rows=n_feedback_eval)
+        else:
+            # A file left by an earlier run would be stale relative to the model being trained.
+            prod_path.unlink(missing_ok=True)
+
     return DataSplit(
         X_train=X_train,
         X_test=X_test,
@@ -146,4 +187,6 @@ def load_and_split(
         n_train=len(X_train),
         n_test=len(X_test),
         class_balance=class_balance,
+        n_feedback_train=n_feedback_train,
+        n_feedback_eval=n_feedback_eval,
     )
