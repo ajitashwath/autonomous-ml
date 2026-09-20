@@ -1,4 +1,4 @@
-# Self-Healing ML Platform
+# Automated ML Monitoring Pipeline
 It autonomously manages the full ML lifecycle: from training and deployment to monitoring, drift detection, statistical validation, and emergency rollbacks.
 
 ## Architecture Highlights
