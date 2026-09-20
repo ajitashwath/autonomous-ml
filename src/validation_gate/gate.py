@@ -2,38 +2,84 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import yaml
-from scipy.stats import chi2
+from scipy.stats import binomtest, chi2
+from sklearn.metrics import roc_auc_score
 
-from src.core.exceptions import ModelNotFoundError
+from src.core.exceptions import ModelNotFoundError, ValidationGateError
 from src.core.logging import get_logger
-from src.model_registry.registry import ModelRegistry, STAGE_PRODUCTION, STAGE_STAGING
+from src.model_registry.registry import (
+    STAGE_PRODUCTION,
+    STAGE_STAGING,
+    ModelInfo,
+    ModelRegistry,
+)
 
 logger = get_logger(__name__)
+
+# Below this many discordant pairs the chi-square approximation is unreliable,
+# so the exact (binomial) form of McNemar's test is used instead.
+EXACT_TEST_MAX_DISCORDANT = 25
+
+PREPROCESSOR_ARTIFACT = "preprocessor/preprocessor.pkl"
+
 
 def load_validation_config(config_path: str) -> dict[str, Any]:
     with open(config_path) as f:
         return yaml.safe_load(f)
 
-def run_mcnemar_test(y_pred_staging: np.ndarray, y_pred_prod: np.ndarray, significance_level: float) -> tuple[float, bool, str]:
-    b = int(np.sum((y_pred_staging != y_pred_prod) & (y_pred_prod == 1)))
-    c = int(np.sum((y_pred_staging != y_pred_prod) & (y_pred_staging == 1)))
-    n_discordant = b + c
-    if n_discordant == 0:
-        logger.warning(
-            "mcnemar_skipped_no_discordant_pairs",
-            reason="Both models agree on every sample — test has no discriminating power.",
-        )
-        return 1.0, True, "skipped (models agree on all samples)"
 
-    chi2_stat = (abs(b - c) - 1.0) ** 2 / (b + c)
-    p_value = 1.0 - chi2.cdf(chi2_stat, df=1)
-    staging_is_better = c > b  # staging fixes more of prod's mistakes than vice versa
+def run_mcnemar_test(
+    y_true: np.ndarray,
+    y_pred_staging: np.ndarray,
+    y_pred_prod: np.ndarray,
+    significance_level: float,
+) -> tuple[float, bool, str]:
+    """McNemar's test on the *correctness* of two classifiers over the same labelled samples.
+
+    b = production right, staging wrong
+    c = staging right, production wrong
+    Staging passes only if the difference is significant AND c > b.
+    """
+    y_true = np.asarray(y_true)
+    y_pred_staging = np.asarray(y_pred_staging)
+    y_pred_prod = np.asarray(y_pred_prod)
+    if not (len(y_true) == len(y_pred_staging) == len(y_pred_prod)):
+        raise ValidationGateError(
+            "McNemar inputs differ in length.",
+            details={
+                "y_true": len(y_true),
+                "staging": len(y_pred_staging),
+                "production": len(y_pred_prod),
+            },
+        )
+
+    staging_ok = y_pred_staging == y_true
+    prod_ok = y_pred_prod == y_true
+    b = int(np.sum(prod_ok & ~staging_ok))
+    c = int(np.sum(staging_ok & ~prod_ok))
+    n_discordant = b + c
+
+    if n_discordant == 0:
+        # Identical correctness everywhere: there is no evidence that staging is better.
+        logger.warning("mcnemar_no_discordant_pairs", b=b, c=c)
+        return 1.0, False, "no discordant pairs — no evidence staging is better than production"
+
+    if n_discordant < EXACT_TEST_MAX_DISCORDANT:
+        p_value = float(binomtest(c, n_discordant, 0.5, alternative="two-sided").pvalue)
+        method = "exact"
+    else:
+        chi2_stat = (abs(b - c) - 1.0) ** 2 / n_discordant
+        p_value = float(chi2.sf(chi2_stat, df=1))
+        method = "chi2"
+
+    staging_is_better = c > b
     test_passed = p_value < significance_level and staging_is_better
     if p_value >= significance_level:
         reason = (
@@ -50,9 +96,9 @@ def run_mcnemar_test(y_pred_staging: np.ndarray, y_pred_prod: np.ndarray, signif
         )
     logger.info(
         "mcnemar_test_complete",
+        method=method,
         b=b,
         c=c,
-        chi2_stat=round(chi2_stat, 4),
         p_value=round(p_value, 4),
         significance_level=significance_level,
         staging_is_better=staging_is_better,
@@ -61,19 +107,64 @@ def run_mcnemar_test(y_pred_staging: np.ndarray, y_pred_prod: np.ndarray, signif
     return p_value, test_passed, reason
 
 
-def get_predictions_on_reference(registry: ModelRegistry, stage: str, reference_path: str, target_col: str = "Churn") -> Optional[np.ndarray]:
+def check_hard_floors(metrics: dict[str, float], floors: dict[str, float]) -> list[str]:
+    """Return a human-readable violation for every floor the metrics do not meet."""
+    violations = []
+    for name, floor in floors.items():
+        value = metrics.get(name)
+        if value is None:
+            violations.append(f"{name} missing (floor {floor})")
+        elif value < floor:
+            violations.append(f"{name}={value:.4f} < floor {floor}")
+    return violations
+
+
+def _decision_threshold(info: ModelInfo) -> float:
     try:
-        import mlflow.xgboost
-        model_uri = registry.get_model_uri(stage=stage)
-        model = mlflow.xgboost.load_model(model_uri)
-        ref_df = pd.read_parquet(reference_path)
-        feature_cols = [c for c in ref_df.columns if c != target_col]
-        X = ref_df[feature_cols]
-        proba = model.predict_proba(X)[:, 1]
-        return (proba >= 0.5).astype(int)
-    except Exception as exc:
-        logger.warning("mcnemar_model_load_failed", stage=stage, error=str(exc))
+        return float(info.params.get("threshold", 0.5))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def load_holdout(path: str, target_column: str) -> tuple[pd.DataFrame, np.ndarray] | None:
+    """Labelled evaluation data (raw features + target), or None if the file is absent."""
+    p = Path(path)
+    if not p.exists():
         return None
+    df = pd.read_parquet(p)
+    if target_column not in df.columns:
+        raise ValidationGateError(
+            f"Holdout data has no target column '{target_column}'.",
+            details={"path": str(p), "columns": list(df.columns)},
+        )
+    y = df[target_column].astype(int).to_numpy()
+    return df.drop(columns=[target_column]), y
+
+
+def score_model(registry: ModelRegistry, info: ModelInfo, X: pd.DataFrame) -> np.ndarray:
+    """Churn probabilities for raw features, using the model *and* its own preprocessor.
+
+    Both are loaded by pinned version/run, so what is scored is exactly what `info` describes.
+    Any failure raises — a gate that cannot score a model must not approve it.
+    """
+    import mlflow.artifacts
+    import mlflow.xgboost
+
+    from src.training_service.preprocessor import load_preprocessor
+
+    try:
+        model = mlflow.xgboost.load_model(registry.get_version_uri(info.version))
+        with tempfile.TemporaryDirectory() as tmp:
+            local = mlflow.artifacts.download_artifacts(
+                run_id=info.run_id, artifact_path=PREPROCESSOR_ARTIFACT, dst_path=tmp
+            )
+            preprocessor = load_preprocessor(local)
+        return np.asarray(model.predict_proba(preprocessor.transform(X))[:, 1])
+    except Exception as exc:
+        raise ValidationGateError(
+            f"Could not score model version {info.version}: {exc}",
+            details={"version": info.version, "run_id": info.run_id},
+        ) from exc
 
 
 def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
@@ -83,6 +174,10 @@ def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
     auc_threshold = gate_cfg.get("auc_delta_threshold", 0.005)
     require_significance = gate_cfg.get("require_significance", True)
     significance_level = gate_cfg.get("significance_level", 0.05)
+    hard_floors = gate_cfg.get("hard_floors", {}) or {}
+    eval_cfg = config.get("evaluation", {})
+    holdout_path = eval_cfg.get("holdout_path", "data/reference/holdout.parquet")
+    target_column = eval_cfg.get("target_column", "Churn")
 
     registry = ModelRegistry()
 
@@ -97,6 +192,16 @@ def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
         logger.error("validation_failed_staging_model_missing_auc_metric")
         sys.exit(1)
 
+    violations = check_hard_floors(staging_info.metrics, hard_floors)
+    if violations:
+        logger.warning(
+            "validation_failed_hard_floors",
+            violations=violations,
+            staging_version=staging_info.version,
+            action="keeping_current_production",
+        )
+        return
+
     try:
         prod_info = registry.get_model_info(stage=STAGE_PRODUCTION)
     except ModelNotFoundError:
@@ -104,11 +209,32 @@ def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
         promote_model(registry, staging_info.version, "First deployment (auto-promoted)")
         return
 
-    prod_auc = prod_info.metrics.get("roc_auc")
-    if prod_auc is None:
-        logger.warning("production_model_missing_auc_metric_forcing_promotion")
-        promote_model(registry, staging_info.version, "Forced promotion (Prod AUC missing)")
-        return
+    holdout = load_holdout(holdout_path, target_column)
+    y_pred_staging = y_pred_prod = y_true = None
+
+    if holdout is None:
+        if require_significance:
+            raise ValidationGateError(
+                "Holdout data is required for the significance test but was not found; "
+                "refusing to promote without it.",
+                details={"holdout_path": holdout_path},
+            )
+        logger.warning("holdout_missing_falling_back_to_logged_auc", path=holdout_path)
+        prod_auc = prod_info.metrics.get("roc_auc")
+        if prod_auc is None:
+            logger.warning("production_model_missing_auc_metric_forcing_promotion")
+            promote_model(registry, staging_info.version, "Forced promotion (Prod AUC missing)")
+            return
+    else:
+        X_holdout, y_true = holdout
+        proba_staging = score_model(registry, staging_info, X_holdout)
+        proba_prod = score_model(registry, prod_info, X_holdout)
+        # Both models are compared on the same labelled samples, not on whatever
+        # split each one happened to log during its own training run.
+        new_auc = float(roc_auc_score(y_true, proba_staging))
+        prod_auc = float(roc_auc_score(y_true, proba_prod))
+        y_pred_staging = (proba_staging >= _decision_threshold(staging_info)).astype(int)
+        y_pred_prod = (proba_prod >= _decision_threshold(prod_info)).astype(int)
 
     logger.info(
         "comparing_models",
@@ -117,6 +243,7 @@ def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
         staging_version=staging_info.version,
         staging_auc=round(new_auc, 4),
         required_improvement=auc_threshold,
+        evaluated_on="holdout" if holdout is not None else "logged_metrics",
     )
 
     delta = new_auc - prod_auc
@@ -132,38 +259,22 @@ def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
     logger.info("stage1_auc_delta_passed", delta=round(delta, 4))
 
     if require_significance:
-        ref_path = config.get("reference", {}).get(
-            "data_path", "data/reference/reference.parquet"
+        p_value, sig_passed, reason = run_mcnemar_test(
+            y_true, y_pred_staging, y_pred_prod, significance_level
         )
-        if not Path(ref_path).exists():
+        if not sig_passed:
             logger.warning(
-                "mcnemar_skipped_no_reference_data",
-                path=ref_path,
-                reason="Proceeding with AUC gate only.",
+                "validation_failed_stage2_mcnemar",
+                p_value=round(p_value, 4),
+                significance_level=significance_level,
+                reason=reason,
+                action="keeping_current_production",
             )
-        else:
-            y_staging = get_predictions_on_reference(registry, STAGE_STAGING, ref_path)
-            y_prod = get_predictions_on_reference(registry, STAGE_PRODUCTION, ref_path)
-
-            if y_staging is not None and y_prod is not None:
-                p_value, sig_passed, reason = run_mcnemar_test(
-                    y_staging, y_prod, significance_level
-                )
-
-                if not sig_passed:
-                    logger.warning(
-                        "validation_failed_stage2_mcnemar",
-                        p_value=round(p_value, 4),
-                        significance_level=significance_level,
-                        reason=reason,
-                        action="keeping_current_production",
-                    )
-                    return
-
-                logger.info("stage2_mcnemar_passed", p_value=round(p_value, 4), reason=reason)
+            return
+        logger.info("stage2_mcnemar_passed", p_value=round(p_value, 4), reason=reason)
 
     logger.info(
-        "validation_passed_both_stages",
+        "validation_passed",
         delta=round(delta, 4),
         staging_version=staging_info.version,
     )
@@ -173,14 +284,12 @@ def validate_and_deploy(config_path: str = "configs/validation.yaml") -> None:
         f"Validation passed. AUC improved by {delta:.4f}",
     )
 
+
 def promote_model(registry: ModelRegistry, version: str, annotation: str) -> None:
-    try:
-        from src.auto_deployer.deployer import deploy_model
-        deploy_model(registry, version, annotation)
-    except ImportError:
-        registry.promote_to_production(version=version)
-        registry.annotate_version(version=version, description=annotation)
-        logger.info("model_promoted_successfully", version=version)
+    from src.auto_deployer.deployer import deploy_model
+
+    deploy_model(registry, version, annotation)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

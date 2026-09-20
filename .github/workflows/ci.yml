@@ -27,13 +27,15 @@ jobs:
         pip install pytest pytest-cov
     - name: Lint with Ruff
       run: |
-        pip install ruff
+        # Pinned: an unpinned ruff can add rules between runs and fail CI with no code change.
+        pip install ruff==0.15.8
         ruff check src/ tests/
-    - name: Run Unit Tests with pytest
+    - name: Run Unit and Integration Tests with pytest
       env:
         PYTHONPATH: ${{ github.workspace }}
       run: |
-        pytest tests/unit/ -v --cov=src --cov-report=xml
+        # Integration tests are hermetic (SQLite / stubbed registry), so they run here too.
+        pytest tests/ -v --cov=src --cov-report=xml
     - name: Upload coverage reports to Codecov
       uses: codecov/codecov-action@v4
       with:
@@ -53,3 +55,11 @@ jobs:
       run: docker build -f src/training_service/Dockerfile -t automlops-trainer:test .
     - name: Build Drift Detector Image
       run: docker build -f src/drift_detector/Dockerfile -t automlops-detector:test .
+    - name: Build Airflow Image
+      run: docker build -f airflow/Dockerfile -t automlops-airflow:test .
+    - name: Build MLflow Image
+      run: docker build -t automlops-mlflow:test ./mlflow
+    - name: Validate docker-compose file
+      run: |
+        cp .env.example .env
+        docker compose --profile tools config --quiet

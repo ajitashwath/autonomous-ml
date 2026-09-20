@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-from src.core.config import get_settings
 from src.core.exceptions import DataLoadError, DataValidationError
 from src.core.logging import get_logger
 
@@ -81,7 +78,8 @@ def load_and_split(
     test_size: float = 0.2,
     random_state: int = 42,
     save_reference: bool = True,
-    reference_path: Optional[str] = None,
+    reference_path: str | None = None,
+    holdout_path: str | None = None,
 ) -> DataSplit:
     path = Path(raw_path)
     if not path.exists():
@@ -129,6 +127,15 @@ def load_and_split(
         ref_df[target_column] = y_train.values
         ref_df.to_parquet(ref_path, index=False)
         logger.info("reference_data_saved", path=str(ref_path), rows=len(ref_df))
+
+    if holdout_path:
+        # Labelled, never-trained-on rows used by the validation gate to compare models.
+        hold_path = Path(holdout_path)
+        hold_path.parent.mkdir(parents=True, exist_ok=True)
+        hold_df = X_test.copy()
+        hold_df[target_column] = y_test.values
+        hold_df.to_parquet(hold_path, index=False)
+        logger.info("holdout_data_saved", path=str(hold_path), rows=len(hold_df))
 
     return DataSplit(
         X_train=X_train,

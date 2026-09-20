@@ -29,11 +29,14 @@ def _get_loader(request: Request) -> ModelLoader:
     summary="Health check",
     description="Returns 200 if the model is loaded and DB is reachable. Returns 503 otherwise.",
 )
-async def health_check(
+def health_check(
     loader: Annotated[ModelLoader, Depends(_get_loader)],
 ) -> JSONResponse:
-    model_loaded = loader.is_loaded()
-    info = loader.get_info()
+    # Plain `def`: check_db_connection() is a blocking call, so this runs in the threadpool
+    # rather than stalling the event loop whenever the database is slow.
+    snapshot = loader.current()
+    model_loaded = snapshot is not None
+    info = snapshot.info if snapshot else None
     db_ok = check_db_connection()
 
     status_str = "ok" if (model_loaded and db_ok) else "degraded"

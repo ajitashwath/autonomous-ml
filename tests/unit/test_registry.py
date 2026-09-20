@@ -8,13 +8,11 @@ import pytest
 
 from src.core.exceptions import ModelNotFoundError, ModelPromotionError, ModelRollbackError
 from src.model_registry.registry import (
-    ModelInfo,
-    ModelRegistry,
-    STAGE_ARCHIVED,
     STAGE_PRODUCTION,
     STAGE_STAGING,
+    ModelInfo,
+    ModelRegistry,
 )
-
 
 
 def _make_model_version(version: str, stage: str, run_id: str = "run-abc") -> MagicMock:
@@ -72,7 +70,8 @@ class TestPromoteToProduction:
     def test_calls_transition(self):
         registry, client = _make_registry()
         mv = _make_model_version("5", STAGE_PRODUCTION)
-        client.get_latest_versions.side_effect = [[], [], [], [mv]]
+        # 1st lookup: no current Production model. 2nd lookup: the promoted version.
+        client.get_latest_versions.side_effect = [[], [mv]]
         client.get_run.return_value.data.metrics = {"roc_auc": 0.87}
         client.get_run.return_value.data.params = {}
 
@@ -90,27 +89,44 @@ class TestPromoteToProduction:
 
     def test_raises_on_transition_failure(self):
         registry, client = _make_registry()
-        mv = _make_model_version("5", STAGE_STAGING)
-        client.get_latest_versions.side_effect = [[], [mv]]
+        client.get_latest_versions.return_value = []
         client.transition_model_version_stage.side_effect = Exception("MLflow error")
 
         with pytest.raises(ModelPromotionError):
             registry.promote_to_production(version="5")
 
+    def test_empty_stage_is_not_retried(self):
+        registry, client = _make_registry()
+        client.get_latest_versions.return_value = []
+
+        with pytest.raises(ModelNotFoundError):
+            registry.get_model_info(stage=STAGE_PRODUCTION)
+
+        assert client.get_latest_versions.call_count == 1
+
+    def test_transport_errors_are_retried(self):
+        registry, client = _make_registry()
+        client.get_latest_versions.side_effect = Exception("connection reset")
+
+        with pytest.raises(ModelNotFoundError):
+            registry.get_model_info(stage=STAGE_PRODUCTION)
+
+        assert client.get_latest_versions.call_count == 3
+
 
 
 class TestRollback:
-    def test_raises_when_no_archived_versions(self):
+    def test_raises_when_no_earlier_version(self):
         registry, client = _make_registry()
         mv_prod = _make_model_version("6", STAGE_PRODUCTION)
-        client.get_latest_versions.side_effect = [
-            [mv_prod],
-            [],
-            [], [], [],
-        ]
+        client.get_latest_versions.return_value = [mv_prod]
+        client.search_model_versions.return_value = [mv_prod]
 
         with pytest.raises(ModelRollbackError):
             registry.rollback()
+
+        # Nothing may be demoted when there is nothing to restore.
+        client.transition_model_version_stage.assert_not_called()
 
 
 

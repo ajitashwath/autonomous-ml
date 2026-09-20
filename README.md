@@ -7,8 +7,6 @@ It autonomously manages the full ML lifecycle: from training and deployment to m
 - **Event-Driven Airflow DAGs** triggered instantly via REST API upon drift.
 - **Automated Statistical Gating** using McNemar's test to ensure new models mathematically beat Production before promotion.
 
-For a full deep-dive, read the `walkthrough.md` or `implementation_plan.md`.
-
 ## Quick Start (Docker Compose)
 
 The entire platform (PostgreSQL, Redis, MLflow, Airflow, Inference API, Prom/Grafana, Drift Detector) is orchestrated via Docker Compose.
@@ -21,8 +19,11 @@ cd self-healing
 # 2. Setup environment variables
 cp .env.example .env
 
-# 3. Start the entire platform
-docker-compose up -d --build
+# 3. Put the dataset where the trainer expects it
+#    (Telco Customer Churn CSV -> data/raw/telco_churn.csv)
+
+# 4. Start the entire platform
+docker compose up -d --build
 ```
 
 ### Accessing the UI's
@@ -37,16 +38,17 @@ Once the containers are healthy, you can access the localized services:
 ## The "Day in the Life" Flow
 
 1. **Initial Training:** 
-   Run the CLI trainer to ingest `telco_churn.csv`, log metrics to MLflow, and save the reference Parquet.
-   `docker exec -it automlops_inference_api python -m src.training_service.train --config configs/training.yaml`
+   Run the trainer to ingest `telco_churn.csv`, log metrics to MLflow, register the model in **Staging**, and save the reference and holdout Parquet files under `data/reference/`.
+   `docker compose run --rm trainer`
 2. **First Deployment:** 
-   The validation gate sees no Production model exists, and auto-promotes the new Staging model. The Inference API background thread loads it into memory.
+   Run the validation gate. With no Production model it auto-promotes the Staging model (subject to the hard floors in `configs/validation.yaml`). The Inference API polls the registry and loads it within a minute.
+   `docker compose run --rm --entrypoint python trainer -m src.validation_gate.gate`
 3. **Live Traffic:** 
    Clients hit `POST /predict`. The API logs features to Postgres asynchronously so I/O never blocks the event loop.
 4. **Drift Detection:** 
    The `drift_detector` container continually compares Postgres logs to the Parquet baseline. 
 5. **Self-Healing:** 
-   If drift exceeds `0.3` (configurable), the detector triggers the Airflow Retraining DAG via REST API. Airflow trains a new model, and if it beats the current one by `0.01` AUC, the Deployer swaps them. The Inference API pulls the new model automatically. 
+   If the share of drifted columns reaches `0.3` (`configs/drift.yaml`) on a window of at least `min_samples` predictions, the detector triggers the Airflow Retraining DAG via REST API (at most once per `retrain_cooldown_seconds`). The DAG runs `train_model`, which stages a new model, then `validate_and_deploy`: the candidate must beat Production by the configured AUC delta on the labelled holdout **and** pass McNemar's test on per-sample correctness. If it does, the Deployer swaps them and the Inference API pulls the new model automatically. 
 
 ## Emergency Rollback
 

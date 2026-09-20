@@ -1,5 +1,3 @@
-version: "3.9"
-
 x-common-env: &common-env
   POSTGRES_HOST: postgres
   POSTGRES_PORT: ${POSTGRES_PORT:-5432}
@@ -53,20 +51,30 @@ services:
       retries: 3
 
   mlflow:
-    image: python:3.10-slim
+    build:
+      context: ./mlflow
     container_name: automlops_mlflow
     restart: unless-stopped
-    command: >
-      bash -c "pip install mlflow psycopg2-binary --quiet &&
-               mlflow server
-               --backend-store-uri postgresql+psycopg2://${POSTGRES_USER:-automlops}:${POSTGRES_PASSWORD:-changeme_in_production}@postgres:5432/${POSTGRES_DB:-automlops}
-               --default-artifact-root /mlruns
-               --host 0.0.0.0
-               --port 5000"
+    # Artifacts are proxied through the server (mlflow-artifacts:/), so clients in other
+    # containers upload/download over HTTP and never need a shared or writable filesystem.
+    command:
+      - mlflow
+      - server
+      - --backend-store-uri
+      - postgresql+psycopg2://${POSTGRES_USER:-automlops}:${POSTGRES_PASSWORD:-changeme_in_production}@postgres:5432/${POSTGRES_DB:-automlops}
+      - --serve-artifacts
+      - --artifacts-destination
+      - /mlartifacts
+      - --default-artifact-root
+      - mlflow-artifacts:/
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
     environment:
       <<: *common-env
     volumes:
-      - mlflow_artifacts:/mlruns
+      - mlflow_artifacts:/mlartifacts
     ports:
       - "5000:5000"
     networks:
@@ -91,18 +99,25 @@ services:
       <<: *common-env
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-automlops}:${POSTGRES_PASSWORD:-changeme_in_production}@postgres:5432/airflow
-      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-change_me_generate_with_fernet_key_generate}
+      # Empty disables encryption of stored connections (dev only). A non-empty value must be a
+      # real Fernet key: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-}
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:-change_me_secret_key}
-      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      # A drift-triggered run must actually run; DAGs are paused on creation by default.
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      # The drift detector calls the REST API with basic auth, which is off by default.
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
       AIRFLOW_USERNAME: ${AIRFLOW_USERNAME:-admin}
       AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
     volumes:
       - ./src/retraining_pipeline/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
-      - ./src:/opt/airflow/src
-      - ./data:/opt/airflow/data
-      - ./configs:/opt/airflow/configs
+      # Same /app layout as the other services; the DAG's tasks run from /app.
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./configs:/app/configs
     ports:
       - "8080:8080"
     networks:
@@ -133,7 +148,6 @@ services:
     volumes:
       - ./src:/app/src
       - ./configs:/app/configs
-      - mlflow_artifacts:/mlruns
     ports:
       - "8000:8000"
     networks:
@@ -149,6 +163,27 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  # One-off training job (not started by `up`): docker compose run --rm trainer
+  # Has ./data mounted, so it can read data/raw/telco_churn.csv and write the reference/holdout
+  # parquet files the drift detector and validation gate read.
+  trainer:
+    profiles: [ "tools" ]
+    build:
+      context: .
+      dockerfile: src/training_service/Dockerfile
+    container_name: automlops_trainer
+    environment:
+      <<: *common-env
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./configs:/app/configs
+    networks:
+      - automlops_network
+    depends_on:
+      mlflow:
+        condition: service_healthy
 
   drift_detector:
     build:

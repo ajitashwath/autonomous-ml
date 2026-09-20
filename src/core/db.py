@@ -1,5 +1,5 @@
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Generator
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -17,7 +17,7 @@ def build_engine():
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
         pool_timeout=settings.db_pool_timeout,
-        pool_pre_ping=True, 
+        pool_pre_ping=True,
         echo=(settings.log_level == "DEBUG"),
     )
     if settings.log_level == "DEBUG":

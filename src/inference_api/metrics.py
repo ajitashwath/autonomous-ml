@@ -2,7 +2,6 @@
 
 from prometheus_client import Counter, Gauge, Histogram
 
-
 PREDICTIONS_TOTAL = Counter(
     name="automlops_predictions_total",
     documentation="Total number of predictions served",

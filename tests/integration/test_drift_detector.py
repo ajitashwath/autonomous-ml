@@ -1,314 +1,304 @@
-
+"""Drift detector against a real (in-memory SQLite) prediction_logs table and a real
+Evidently run. Only Airflow/Slack are mocked; report output goes to tmp_path."""
 from __future__ import annotations
 
 import json
 import uuid
-from unittest.mock import MagicMock, patch
+from contextlib import contextmanager
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from src.data_logger.models import Base, PredictionLog
-import src.drift_detector.detector
+from src.drift_detector import detector
+
+THRESHOLD = 0.3
+MIN_SAMPLES = 50
+N_REF = 500
 
 
-
-REFERENCE_FEATURES = {
-    "tenure": 24,
-    "MonthlyCharges": 50.0,
-    "TotalCharges": 1200.0,
-}
-
-DRIFT_WINDOW_SIZE = 10
-
-
-def _make_ref_df(n=50, shift: float = 1.0) -> pd.DataFrame:
+def _ref_df() -> pd.DataFrame:
     rng = np.random.default_rng(42)
     return pd.DataFrame({
-        "tenure": rng.integers(1, 72, size=n).tolist(),
-        "MonthlyCharges": (rng.uniform(20, 100, size=n) * shift).tolist(),
-        "TotalCharges": (rng.uniform(100, 8000, size=n) * shift).tolist(),
+        "tenure": rng.integers(1, 72, size=N_REF),
+        "MonthlyCharges": rng.uniform(20, 100, size=N_REF),
+        "TotalCharges": rng.uniform(100, 8000, size=N_REF),
     })
 
 
-def _seed_logs(session: Session, n: int, features: dict | None = None) -> list[str]:
-    ids = []
-    base_features = features or {
-        "tenure": 24,
-        "MonthlyCharges": 50.0,
-        "TotalCharges": 1200.0,
-    }
-    for _ in range(n):
-        log = PredictionLog(
-            id=uuid.uuid4(),
-            request_id=str(uuid.uuid4()),
-            features=base_features,
-            prediction=0,
-            probability=0.3,
-            model_version="1",
-            drift_analyzed=False,
-        )
-        session.add(log)
-        ids.append(str(log.id))
-    session.commit()
-    return ids
+@pytest.fixture()
+def session_factory(monkeypatch):
+    engine = create_engine(
+        "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    @contextmanager
+    def fake_db_session():
+        session = factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    monkeypatch.setattr(detector, "db_session", fake_db_session)
+    return factory
 
 
 @pytest.fixture()
-def in_memory_engine():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    return engine
+def env(tmp_path, session_factory):
+    ref = _ref_df()
+    ref_path = tmp_path / "reference.parquet"
+    ref.to_parquet(ref_path, index=False)
+    out_dir = tmp_path / "reports"
+
+    config = {
+        "detection": {
+            "window_size": 1000,
+            "drift_share_threshold": THRESHOLD,
+            "pvalue_threshold": 0.05,
+            "min_samples": MIN_SAMPLES,
+            "retrain_cooldown_seconds": 3600,
+        },
+        "reference": {"data_path": str(ref_path)},
+        "evidently": {"report_output_dir": str(out_dir)},
+        "alerting": {"trigger_airflow": True},
+    }
+
+    class Env:
+        pass
+
+    e = Env()
+    e.ref, e.out_dir, e.config, e.session_factory = ref, out_dir, config, session_factory
+    e.run = lambda: _run(config)
+    return e
 
 
-
-def _count_analyzed(session: Session) -> int:
-    return session.query(PredictionLog).filter(
-        PredictionLog.drift_analyzed == True
-    ).count()
+def _run(config):
+    with patch.object(detector, "load_drift_config", return_value=config):
+        return detector.run_drift_detection(config_path="ignored.yaml")
 
 
-def _count_unanalyzed(session: Session) -> int:
-    return session.query(PredictionLog).filter(
-        PredictionLog.drift_analyzed == False
-    ).count()
+def _seed(factory, rows: list[dict]) -> None:
+    with factory() as session:
+        for features in rows:
+            session.add(PredictionLog(
+                id=uuid.uuid4(), request_id=str(uuid.uuid4()), features=features,
+                prediction=0, probability=0.3, model_version="1", drift_analyzed=False,
+            ))
+        session.commit()
 
 
-
-class TestDriftDetectorNoData:
-
-    def test_no_logs_does_not_trigger_airflow(self, in_memory_engine):
-        ref_df = _make_ref_df(50)
-
-        with patch("src.drift_detector.detector.db_session") as mock_db, \
-             patch("src.drift_detector.detector.pd.read_parquet", return_value=ref_df), \
-             patch("src.drift_detector.detector.Path.exists", return_value=True), \
-             patch("src.drift_detector.detector.trigger_retraining_dag") as mock_trigger, \
-             patch("src.drift_detector.detector.load_drift_config") as mock_cfg:
-
-            mock_cfg.return_value = {
-                "detection": {
-                    "window_size": DRIFT_WINDOW_SIZE,
-                    "drift_share_threshold": 0.3,
-                },
-                "reference": {"data_path": "fake/path.parquet"},
-                "evidently": {"report_output_dir": "data/drift_reports"},
-                "alerting": {"trigger_airflow": True},
-            }
-
-            mock_session = MagicMock()
-            mock_session.scalars.return_value.all.return_value = []
-            mock_db.return_value.__enter__ = lambda s, *a: mock_session
-            mock_db.return_value.__exit__ = MagicMock(return_value=False)
-
-            from src.drift_detector.detector import run_drift_detection
-            run_drift_detection(config_path="fake/drift.yaml")
-
-            mock_trigger.assert_not_called()
+def _matching_rows(ref: pd.DataFrame, n: int) -> list[dict]:
+    return ref.sample(n, random_state=7).to_dict(orient="records")
 
 
-class TestDriftDetectorNoDrift:
-
-    def test_matching_data_does_not_alert(self, in_memory_engine):
-        ref_df = _make_ref_df(50, shift=1.0)
-        curr_logs = [
-            MagicMock(
-                drift_analyzed=False,
-                features={"tenure": int(ref_df["tenure"].iloc[i]),
-                          "MonthlyCharges": float(ref_df["MonthlyCharges"].iloc[i]),
-                          "TotalCharges": float(ref_df["TotalCharges"].iloc[i])},
-                id=uuid.uuid4(),
-                created_at=None,
-            )
-            for i in range(min(DRIFT_WINDOW_SIZE, len(ref_df)))
-        ]
-
-        with patch("src.drift_detector.detector.db_session") as mock_db, \
-             patch("src.drift_detector.detector.pd.read_parquet", return_value=ref_df), \
-             patch("src.drift_detector.detector.Path.exists", return_value=True), \
-             patch("src.drift_detector.detector.trigger_retraining_dag") as mock_trigger, \
-             patch("src.drift_detector.detector.load_drift_config") as mock_cfg:
-
-            mock_cfg.return_value = {
-                "detection": {
-                    "window_size": DRIFT_WINDOW_SIZE,
-                    "drift_share_threshold": 0.3,
-                },
-                "reference": {"data_path": "fake/path.parquet"},
-                "evidently": {"report_output_dir": "data/drift_reports"},
-                "alerting": {"trigger_airflow": True},
-            }
-
-            mock_session = MagicMock()
-            mock_session.scalars.return_value.all.return_value = curr_logs
-            mock_db.return_value.__enter__ = lambda s, *a: mock_session
-            mock_db.return_value.__exit__ = MagicMock(return_value=False)
-
-            from src.drift_detector.detector import run_drift_detection
-            run_drift_detection(config_path="fake/drift.yaml")
-
-            mock_trigger.assert_not_called()
-
-    def test_all_logs_marked_analyzed_after_run(self, in_memory_engine):
-        ref_df = _make_ref_df(50)
-        curr_logs = [
-            MagicMock(
-                drift_analyzed=False,
-                features={"tenure": 24, "MonthlyCharges": 50.0, "TotalCharges": 1200.0},
-                id=uuid.uuid4(),
-                created_at=None,
-            )
-            for _ in range(DRIFT_WINDOW_SIZE)
-        ]
-        analyzed_flags = [False] * len(curr_logs)
-
-        for i, log in enumerate(curr_logs):
-            idx = i
-
-            def make_setter(j):
-                def setter(val):
-                    analyzed_flags[j] = val
-                return setter
-
-            type(log).__setattr__ = lambda self, name, val, _i=i: (
-                analyzed_flags.__setitem__(_i, val) if name == "drift_analyzed" else None
-            )
-
-        with patch("src.drift_detector.detector.db_session") as mock_db, \
-             patch("src.drift_detector.detector.pd.read_parquet", return_value=ref_df), \
-             patch("src.drift_detector.detector.Path.exists", return_value=True), \
-             patch("src.drift_detector.detector.trigger_retraining_dag"), \
-             patch("src.drift_detector.detector.load_drift_config") as mock_cfg:
-
-            mock_cfg.return_value = {
-                "detection": {
-                    "window_size": DRIFT_WINDOW_SIZE,
-                    "drift_share_threshold": 0.3,
-                },
-                "reference": {"data_path": "fake/path.parquet"},
-                "evidently": {"report_output_dir": "data/drift_reports"},
-                "alerting": {"trigger_airflow": True},
-            }
-
-            mock_session = MagicMock()
-            mock_session.scalars.return_value.all.return_value = curr_logs
-            mock_db.return_value.__enter__ = lambda s, *a: mock_session
-            mock_db.return_value.__exit__ = MagicMock(return_value=False)
-
-            from src.drift_detector import detector as det_module
-            import importlib
-            importlib.reload(det_module)
-            det_module.run_drift_detection(config_path="fake/drift.yaml")
-
-            for log in curr_logs:
-                assert log.drift_analyzed is True
+def _drifted_rows(n: int) -> list[dict]:
+    return [
+        {"tenure": 1, "MonthlyCharges": 9999.0 + i, "TotalCharges": 99999.0 + i}
+        for i in range(n)
+    ]
 
 
-class TestDriftDetectorSevereDrift:
+def _count(factory, analyzed: bool) -> int:
+    with factory() as session:
+        return session.query(PredictionLog).filter(
+            PredictionLog.drift_analyzed.is_(analyzed)
+        ).count()
 
-    def test_severe_drift_triggers_airflow(self, in_memory_engine):
-        rng = np.random.default_rng(0)
-        ref_df = pd.DataFrame({
-            "tenure": rng.integers(1, 72, size=50).tolist(),
-            "MonthlyCharges": rng.uniform(20, 100, size=50).tolist(),
-            "TotalCharges": rng.uniform(100, 8000, size=50).tolist(),
-        })
 
-        drifted_features = {
-            "tenure": 1,
-            "MonthlyCharges": 9999.0,
-            "TotalCharges": 99999.0,
-        }
-        curr_logs = [
-            MagicMock(
-                drift_analyzed=False,
-                features=drifted_features,
-                id=uuid.uuid4(),
-                created_at=None,
-            )
-            for _ in range(DRIFT_WINDOW_SIZE)
-        ]
+@pytest.fixture()
+def trigger():
+    with patch.object(detector, "trigger_retraining_dag", return_value="run-1") as mock, \
+         patch.object(detector, "send_slack_alert"):
+        yield mock
 
-        captured_payload = {}
 
-        def capture_trigger(payload):
-            captured_payload.update(payload)
-            return "dag_run_test_001"
+class TestNoDrift:
+    def test_matching_data_does_not_trigger_and_reports_observed_share(self, env, trigger):
+        """Regression: `drift_share` from Evidently is its threshold (0.5), which always
+        exceeded 0.3 — so retraining fired on every run even with zero drifted columns."""
+        _seed(env.session_factory, _matching_rows(env.ref, 100))
 
-        with patch("src.drift_detector.detector.db_session") as mock_db, \
-             patch("src.drift_detector.detector.pd.read_parquet", return_value=ref_df), \
-             patch("src.drift_detector.detector.Path.exists", return_value=True), \
-             patch("src.drift_detector.detector.trigger_retraining_dag",
-                   side_effect=capture_trigger) as mock_trigger, \
-             patch("src.drift_detector.detector.load_drift_config") as mock_cfg, \
-             patch("evidently.report.Report.save_html"):
+        env.run()
 
-            mock_cfg.return_value = {
-                "detection": {
-                    "window_size": DRIFT_WINDOW_SIZE,
-                    "drift_share_threshold": 0.01,
-                },
-                "reference": {"data_path": "fake/path.parquet"},
-                "evidently": {"report_output_dir": "/tmp/drift_reports"},
-                "alerting": {"trigger_airflow": True},
-            }
+        trigger.assert_not_called()
+        metrics = json.loads((env.out_dir / "latest_drift_metrics.json").read_text())
+        assert metrics["drifted_features"] == 0
+        assert metrics["drift_share"] == 0.0
+        assert metrics["drift_share"] < THRESHOLD
 
-            mock_session = MagicMock()
-            mock_session.scalars.return_value.all.return_value = curr_logs
-            mock_db.return_value.__enter__ = lambda s, *a: mock_session
-            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+    def test_analyzed_rows_are_marked_after_a_successful_run(self, env, trigger):
+        _seed(env.session_factory, _matching_rows(env.ref, 100))
 
-            from src.drift_detector.detector import run_drift_detection
-            run_drift_detection(config_path="fake/drift.yaml")
+        env.run()
 
-            mock_trigger.assert_called_once()
-            assert "drift_share" in captured_payload
-            assert captured_payload["drift_share"] > 0.0
+        assert _count(env.session_factory, analyzed=True) == 100
+        assert _count(env.session_factory, analyzed=False) == 0
 
-    def test_airflow_trigger_disabled_does_not_call(self):
-        rng = np.random.default_rng(1)
-        ref_df = pd.DataFrame({
-            "tenure": rng.integers(1, 72, size=50).tolist(),
-            "MonthlyCharges": rng.uniform(20, 100, size=50).tolist(),
-            "TotalCharges": rng.uniform(100, 8000, size=50).tolist(),
-        })
+    def test_no_logs_is_a_noop(self, env, trigger):
+        env.run()
 
-        curr_logs = [
-            MagicMock(
-                drift_analyzed=False,
-                features={"tenure": 1, "MonthlyCharges": 9999.0, "TotalCharges": 99999.0},
-                id=uuid.uuid4(),
-                created_at=None,
-            )
-            for _ in range(DRIFT_WINDOW_SIZE)
-        ]
+        trigger.assert_not_called()
+        assert not (env.out_dir / "latest_drift_metrics.json").exists()
 
-        with patch("src.drift_detector.detector.db_session") as mock_db, \
-             patch("src.drift_detector.detector.pd.read_parquet", return_value=ref_df), \
-             patch("src.drift_detector.detector.Path.exists", return_value=True), \
-             patch("src.drift_detector.detector.trigger_retraining_dag") as mock_trigger, \
-             patch("src.drift_detector.detector.load_drift_config") as mock_cfg, \
-             patch("evidently.report.Report.save_html"):
 
-            mock_cfg.return_value = {
-                "detection": {
-                    "window_size": DRIFT_WINDOW_SIZE,
-                    "drift_share_threshold": 0.01,
-                },
-                "reference": {"data_path": "fake/path.parquet"},
-                "evidently": {"report_output_dir": "/tmp/drift_reports"},
-                "alerting": {"trigger_airflow": False},
-            }
+class TestMinimumSampleSize:
+    def test_small_window_is_not_analyzed_and_not_consumed(self, env, trigger):
+        _seed(env.session_factory, _drifted_rows(MIN_SAMPLES - 1))
 
-            mock_session = MagicMock()
-            mock_session.scalars.return_value.all.return_value = curr_logs
-            mock_db.return_value.__enter__ = lambda s, *a: mock_session
-            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+        env.run()
 
-            from src.drift_detector.detector import run_drift_detection
-            run_drift_detection(config_path="fake/drift.yaml")
+        trigger.assert_not_called()
+        assert not (env.out_dir / "latest_drift_metrics.json").exists()
+        assert _count(env.session_factory, analyzed=False) == MIN_SAMPLES - 1
 
-            mock_trigger.assert_not_called()
+    def test_rows_accumulate_until_the_window_is_large_enough(self, env, trigger):
+        _seed(env.session_factory, _drifted_rows(MIN_SAMPLES - 1))
+        env.run()
+        trigger.assert_not_called()
+
+        _seed(env.session_factory, _drifted_rows(1))
+        env.run()
+
+        trigger.assert_called_once()
+        assert _count(env.session_factory, analyzed=True) == MIN_SAMPLES
+
+
+class TestDriftDetected:
+    def test_severe_drift_triggers_retraining_once_with_observed_metrics(self, env, trigger):
+        _seed(env.session_factory, _drifted_rows(100))
+
+        env.run()
+
+        trigger.assert_called_once()
+        payload = trigger.call_args.args[0]
+        assert payload["drift_share"] == pytest.approx(1.0)
+        assert payload["drift_share"] >= payload["drift_share_threshold"]
+        assert (env.out_dir / "latest_drift_report.html").exists()
+        assert _count(env.session_factory, analyzed=True) == 100
+
+    def test_trigger_disabled_never_calls_airflow(self, env, trigger):
+        env.config["alerting"]["trigger_airflow"] = False
+        _seed(env.session_factory, _drifted_rows(100))
+
+        env.run()
+
+        trigger.assert_not_called()
+
+
+class TestCooldown:
+    def test_persistent_drift_does_not_retrigger_within_cooldown(self, env, trigger):
+        with patch.object(detector.time, "time", return_value=1_000_000.0):
+            _seed(env.session_factory, _drifted_rows(100))
+            env.run()
+        with patch.object(detector.time, "time", return_value=1_000_000.0 + 300):
+            _seed(env.session_factory, _drifted_rows(100))
+            env.run()
+
+        assert trigger.call_count == 1
+
+    def test_retriggers_after_cooldown_expires(self, env, trigger):
+        with patch.object(detector.time, "time", return_value=1_000_000.0):
+            _seed(env.session_factory, _drifted_rows(100))
+            env.run()
+        with patch.object(detector.time, "time", return_value=1_000_000.0 + 3601):
+            _seed(env.session_factory, _drifted_rows(100))
+            env.run()
+
+        assert trigger.call_count == 2
+
+    def test_zero_cooldown_disables_suppression(self, env, trigger):
+        env.config["detection"]["retrain_cooldown_seconds"] = 0
+        for _ in range(2):
+            _seed(env.session_factory, _drifted_rows(100))
+            env.run()
+
+        assert trigger.call_count == 2
+
+
+class TestFailureHandling:
+    def test_trigger_failure_is_contained_and_does_not_start_cooldown(self, env):
+        with patch.object(detector, "send_slack_alert"), \
+             patch.object(detector, "trigger_retraining_dag", side_effect=RuntimeError("airflow down")):
+            _seed(env.session_factory, _drifted_rows(100))
+            env.run()  # must not raise
+
+        assert not (env.out_dir / detector.TRIGGER_STATE_FILE).exists()
+
+        with patch.object(detector, "send_slack_alert"), \
+             patch.object(detector, "trigger_retraining_dag", return_value="run-2") as retry:
+            _seed(env.session_factory, _drifted_rows(100))
+            env.run()
+
+        retry.assert_called_once()
+
+    def test_metric_extraction_failure_leaves_rows_unanalyzed(self, env, trigger):
+        _seed(env.session_factory, _matching_rows(env.ref, 100))
+
+        with patch.object(detector, "extract_drift_summary", side_effect=KeyError("boom")):
+            env.run()
+
+        assert _count(env.session_factory, analyzed=False) == 100
+        trigger.assert_not_called()
+
+    def test_evidently_crash_does_not_consume_the_window(self, env, trigger):
+        """Regression: rows used to be marked analyzed before analysis ran."""
+        _seed(env.session_factory, _matching_rows(env.ref, 100))
+
+        with patch.object(detector.Report, "run", side_effect=RuntimeError("evidently crashed")):
+            with pytest.raises(RuntimeError):
+                env.run()
+
+        assert _count(env.session_factory, analyzed=False) == 100
+        assert _count(env.session_factory, analyzed=True) == 0
+
+
+class TestOutcomes:
+    """run_drift_detection reports what it did, so a one-shot run can exit non-zero when the
+    detector cannot do its job (a scheduler would otherwise show it green forever)."""
+
+    def test_no_logs(self, env, trigger):
+        assert env.run() == detector.Outcome.NO_NEW_LOGS
+
+    def test_insufficient_samples(self, env, trigger):
+        _seed(env.session_factory, _drifted_rows(MIN_SAMPLES - 1))
+        assert env.run() == detector.Outcome.INSUFFICIENT_SAMPLES
+
+    def test_no_drift(self, env, trigger):
+        _seed(env.session_factory, _matching_rows(env.ref, 100))
+        assert env.run() == detector.Outcome.NO_DRIFT
+
+    def test_drift_detected(self, env, trigger):
+        _seed(env.session_factory, _drifted_rows(100))
+        assert env.run() == detector.Outcome.DRIFT_DETECTED
+
+    def test_drift_still_reported_while_the_trigger_is_in_cooldown(self, env, trigger):
+        with patch.object(detector.time, "time", return_value=1_000_000.0):
+            _seed(env.session_factory, _drifted_rows(100))
+            env.run()
+            _seed(env.session_factory, _drifted_rows(100))
+            assert env.run() == detector.Outcome.DRIFT_DETECTED
+
+    def test_missing_reference_data_is_a_failure_outcome(self, env, trigger):
+        env.config["reference"]["data_path"] = str(env.out_dir / "missing.parquet")
+        outcome = env.run()
+        assert outcome == detector.Outcome.NO_REFERENCE
+        assert outcome in detector.FAILURE_OUTCOMES
+
+    def test_unreachable_airflow_is_a_failure_outcome(self, env):
+        with patch.object(detector, "send_slack_alert"),              patch.object(detector, "trigger_retraining_dag", side_effect=RuntimeError("airflow down")):
+            _seed(env.session_factory, _drifted_rows(100))
+            outcome = env.run()
+        assert outcome == detector.Outcome.TRIGGER_FAILED
+        assert outcome in detector.FAILURE_OUTCOMES

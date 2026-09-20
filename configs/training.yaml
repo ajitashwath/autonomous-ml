@@ -7,6 +7,7 @@ data:
   random_state: 42
   save_reference: true
   reference_path: "data/reference/reference.parquet"
+  holdout_path: "data/reference/holdout.parquet"
 
 features:
   categorical:

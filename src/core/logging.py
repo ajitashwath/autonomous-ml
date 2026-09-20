@@ -6,6 +6,7 @@ import structlog
 
 from src.core.config import get_settings
 
+
 def configure_logging() -> None:
     settings = get_settings()
     log_level = getattr(logging, settings.log_level.upper(), logging.INFO)

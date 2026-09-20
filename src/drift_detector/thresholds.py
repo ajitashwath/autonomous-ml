@@ -1,5 +1,6 @@
 import yaml
 
+
 def get_drift_thresholds(config_path: str = "configs/drift.yaml") -> dict:
     with open(config_path) as f:
         config = yaml.safe_load(f)

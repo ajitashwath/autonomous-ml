@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Optional
 
 from src.core.exceptions import ModelRollbackError
 from src.core.logging import get_logger
@@ -13,7 +12,7 @@ from src.model_registry.registry import ModelRegistry
 logger = get_logger(__name__)
 
 
-def execute_rollback(reason: str, target_version: Optional[str] = None) -> None:
+def execute_rollback(reason: str, target_version: str | None = None) -> None:
     logger.warning("emergency_rollback_initiated", reason=reason, target=target_version or "latest_archived")
     registry = ModelRegistry()
     try:
@@ -22,7 +21,7 @@ def execute_rollback(reason: str, target_version: Optional[str] = None) -> None:
         from src.core.exceptions import ModelNotFoundError
         try:
             current_prod = registry.get_model_info()
-            demoted_version: Optional[str] = current_prod.version
+            demoted_version: str | None = current_prod.version
         except ModelNotFoundError:
             demoted_version = None
 
@@ -37,7 +36,7 @@ def execute_rollback(reason: str, target_version: Optional[str] = None) -> None:
             )
         registry.annotate_version(
             version=restored_version,
-            description=f"[RESTORED-TO-PROD] Emergency rollback replacement."
+            description="[RESTORED-TO-PROD] Emergency rollback replacement."
         )
         logger.info(
             "rollback_successful",
@@ -56,15 +55,15 @@ def execute_rollback(reason: str, target_version: Optional[str] = None) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Emergency Model Rollback Tool")
     parser.add_argument(
-        "--reason", 
-        type=str, 
-        required=True, 
+        "--reason",
+        type=str,
+        required=True,
         help="Mandatory reason for the rollback (added to MLflow audit logs)"
     )
     parser.add_argument(
-        "--target-version", 
-        type=str, 
-        default=None, 
+        "--target-version",
+        type=str,
+        default=None,
         help="Optional specific version string to restore. Defaults to the latest archived version."
     )
     args = parser.parse_args()

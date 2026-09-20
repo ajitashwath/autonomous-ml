@@ -15,6 +15,7 @@ import yaml
 from src.core.config import get_settings
 from src.core.exceptions import AutoMLOpsError
 from src.core.logging import configure_logging, get_logger
+from src.model_registry.registry import ModelInfo, ModelRegistry
 from src.training_service.data_loader import load_and_split
 from src.training_service.evaluator import evaluate
 from src.training_service.model import build_model, predict_proba, train_model
@@ -85,14 +86,20 @@ def log_run(
     Path(features_path).write_text("\n".join(feature_names))
     mlflow.log_artifact(features_path, artifact_path="preprocessor")
 
-    mlflow.xgboost.log_model(
-        xgb_model=model,
-        artifact_path="model",
-        registered_model_name=settings.mlflow_model_name,
-    )
+    # Registration is a separate, explicit step (register_and_stage) so a new version
+    # always lands in Staging, which is where the validation gate looks for candidates.
+    mlflow.xgboost.log_model(xgb_model=model, artifact_path="model")
 
     logger.info("mlflow_run_logged", run_id=run_id, **eval_result.to_dict())
     return run_id
+
+
+def register_and_stage(run_id: str) -> ModelInfo:
+    registry = ModelRegistry()
+    registered = registry.register_new_version(run_id)
+    staged = registry.transition_to_staging(registered.version)
+    logger.info("model_staged_for_validation", version=staged.version, run_id=run_id)
+    return staged
 
 
 
@@ -119,6 +126,7 @@ def run_training_pipeline(config_path: str = "configs/training.yaml") -> None:
             random_state=data_cfg["random_state"],
             save_reference=data_cfg.get("save_reference", True),
             reference_path=data_cfg.get("reference_path"),
+            holdout_path=data_cfg.get("holdout_path"),
         )
 
         preprocessor = build_preprocessor(
@@ -162,9 +170,12 @@ def run_training_pipeline(config_path: str = "configs/training.yaml") -> None:
             elapsed_seconds=elapsed,
         )
 
+        staged = register_and_stage(run_id)
+
         logger.info(
             "training_pipeline_finished",
             run_id=run_id,
+            staged_version=staged.version,
             model_name=settings.mlflow_model_name,
             auc=round(eval_result.roc_auc, 4),
         )

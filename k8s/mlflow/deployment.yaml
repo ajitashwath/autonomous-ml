@@ -23,10 +23,12 @@ spec:
             - /bin/sh
             - -c
             - |
-              pip install mlflow psycopg2-binary --quiet &&
+              pip install mlflow==2.13.0 psycopg2-binary==2.9.9 --quiet &&
               mlflow server \
                 --backend-store-uri $(DATABASE_URL) \
-                --default-artifact-root /mlruns \
+                --serve-artifacts \
+                --artifacts-destination /mlruns \
+                --default-artifact-root mlflow-artifacts:/ \
                 --host 0.0.0.0 \
                 --port 5000
           ports:

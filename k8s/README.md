@@ -92,7 +92,7 @@ Internet/Ingress ──►│   inference-api     │ :8000 (ClusterIP)
 
 ## Scaling Notes
 - **Inference API**: The HPA scales from 3→10 pods at 70% CPU. For GPU workloads, replace with a custom metric on `automlops_active_requests`.
-- **Drift Detector**: Runs as a CronJob with `concurrencyPolicy: Forbid` — at most one detection job runs at a time.
+- **Drift Detector**: Runs as a CronJob with `concurrencyPolicy: Forbid` — at most one detection job runs at a time. Each run is a single pass (`--once`); reports and the retrain-cooldown state are kept on the shared PVC (`drift_reports/`), and reference data is read from it (`reference/`). A run exits non-zero when it cannot do its job (no reference data, analysis failure, or Airflow unreachable), so check `kubectl get jobs` — a failing Job means drift detection is not working. Airflow is **not** deployed by these manifests; `AIRFLOW_HOST` must point at an existing instance.
 - **MLflow**: Single replica is sufficient for model registry operations. Add a ReadWriteMany PV if you need HA.
 
 ## Health Checks

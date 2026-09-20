@@ -3,6 +3,10 @@ detection:
   check_interval_seconds: 300
   drift_share_threshold: 0.3
   pvalue_threshold: 0.05
+  # Windows smaller than this are left unanalyzed and accumulate until large enough.
+  min_samples: 100
+  # Minimum gap between retraining triggers while drift persists (0 disables).
+  retrain_cooldown_seconds: 3600
 
 reference:
   data_path: "data/reference/reference.parquet"

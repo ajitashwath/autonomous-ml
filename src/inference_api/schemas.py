@@ -5,8 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated
 
-from pydantic import BaseModel, Field, field_validator
-
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class GenderEnum(str, Enum):
@@ -102,6 +101,9 @@ class ChurnFeatures(BaseModel):
 
 
 class PredictionResponse(BaseModel):
+    # `model_*` field names are part of the public API; silence pydantic's reserved-prefix warning.
+    model_config = ConfigDict(protected_namespaces=())
+
     prediction:       int   = Field(description="0 = No churn, 1 = Churn")
     probability:      float = Field(description="Probability of churn (0.0 – 1.0)")
     model_version:    str   = Field(description="MLflow model version used")
@@ -110,6 +112,8 @@ class PredictionResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     status:        str
     model_loaded:  bool
     model_version: str | None
@@ -152,6 +156,8 @@ class BatchPredictionRequest(BaseModel):
 
 
 class BatchPredictionResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     predictions: list[PredictionResponse] = Field(description="Per-request results in input order.")
     count:        int                       = Field(description="Number of predictions returned.")
     model_version: str                      = Field(description="Model version used for all predictions.")

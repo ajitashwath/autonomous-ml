@@ -38,3 +38,6 @@ Thumbs.db
 # IDEs
 .vscode/settings.json
 .idea/
+
+# Kubernetes secrets (filled-in copy of k8s/secret.yaml.template)
+k8s/secret.yaml

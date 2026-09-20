@@ -7,13 +7,13 @@ metadata:
     app: drift-detector
     app.kubernetes.io/part-of: automlops
 spec:
-  schedule: "*/5 * * * *"     
+  schedule: "*/5 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 5
   jobTemplate:
     spec:
-      backoffLimit: 1      
+      backoffLimit: 1
       activeDeadlineSeconds: 240
       template:
         metadata:
@@ -21,14 +21,24 @@ spec:
             app: drift-detector
         spec:
           restartPolicy: OnFailure
+          securityContext:
+            # The image runs as uid 1001; fsGroup makes the PVC writable for it.
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
           containers:
             - name: drift-detector
               image: automlops/drift-detector:latest
               imagePullPolicy: Always
+              # --once: a single pass, then exit. Without it the detector runs as a daemon and
+              # the job would only ever end by hitting activeDeadlineSeconds.
+              # Exit 2 = the detector could not do its job (no reference data, analysis failure,
+              # Airflow unreachable), so the Job shows as failed rather than silently green.
               command:
                 - python
                 - -m
                 - src.drift_detector.detector
+                - --once
               envFrom:
                 - configMapRef:
                     name: automlops-config
@@ -42,15 +52,16 @@ spec:
                   cpu: "500m"
                   memory: "1Gi"
               volumeMounts:
-                - name: reference-data
+                - name: data
                   mountPath: /app/data/reference
+                  subPath: reference
                   readOnly: true
-                - name: drift-reports
+                # Persistent: holds the latest metrics/report and the retrain cooldown state,
+                # which must survive from one CronJob run (one pod) to the next.
+                - name: data
                   mountPath: /app/data/drift_reports
+                  subPath: drift_reports
           volumes:
-            - name: reference-data
+            - name: data
               persistentVolumeClaim:
                 claimName: automlops-data-pvc
-                readOnly: true
-            - name: drift-reports
-              emptyDir: {}

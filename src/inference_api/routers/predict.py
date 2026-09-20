@@ -1,17 +1,17 @@
-
-
 from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Sequence
 from typing import Annotated
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 
 from src.core.exceptions import ModelLoadError
 from src.core.logging import get_logger
+from src.data_logger.logger import log_predictions_safe
 from src.inference_api.metrics import (
     ACTIVE_REQUESTS,
     ERRORS_TOTAL,
@@ -19,7 +19,7 @@ from src.inference_api.metrics import (
     PREDICTIONS_TOTAL,
     REQUEST_LATENCY,
 )
-from src.inference_api.model_loader import ModelLoader
+from src.inference_api.model_loader import ModelLoader, ModelSnapshot
 from src.inference_api.schemas import (
     BatchPredictionRequest,
     BatchPredictionResponse,
@@ -30,18 +30,70 @@ from src.inference_api.schemas import (
 logger = get_logger(__name__)
 router = APIRouter(tags=["Predictions"])
 
+_BATCH_MAX_SIZE = 500
+
+# These handlers are plain `def`, not `async def`: preprocessing and XGBoost inference are
+# CPU-bound and synchronous, so FastAPI runs them in its threadpool instead of blocking the
+# event loop (and with it /health, /metrics and every other in-flight request).
+
 
 def _get_loader(request: Request) -> ModelLoader:
     return request.app.state.model_loader
 
 
-def _features_to_dataframe(features: ChurnFeatures) -> pd.DataFrame:
-    row = {
-        field: getattr(features, field)
-        for field in features.model_fields
+def _get_snapshot(loader: ModelLoader) -> ModelSnapshot:
+    # One snapshot per request: model, preprocessor and version metadata always belong together
+    # even if a hot-swap lands mid-request.
+    try:
+        return loader.get_snapshot()
+    except ModelLoadError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc.message),
+        )
+
+
+def _to_dataframe(items: Sequence[ChurnFeatures]) -> pd.DataFrame:
+    return pd.DataFrame([item.model_dump(mode="json") for item in items])
+
+
+def _score(snapshot: ModelSnapshot, X: pd.DataFrame, *, kind: str = "") -> np.ndarray:
+    """Churn probabilities for raw features. `kind` prefixes the error metric ("batch_")."""
+    try:
+        X_processed = snapshot.preprocessor.transform(X)
+    except Exception as exc:
+        ERRORS_TOTAL.labels(error_type=f"{kind}preprocessing_error").inc()
+        logger.error(f"{kind}preprocessing_failed", n=len(X), error=str(exc), exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "Batch feature preprocessing failed." if kind else "Feature preprocessing failed."
+            ),
+        )
+
+    try:
+        return np.asarray(snapshot.model.predict_proba(X_processed)[:, 1], dtype=float)
+    except Exception as exc:
+        ERRORS_TOTAL.labels(error_type=f"{kind}prediction_error").inc()
+        logger.error(f"{kind}prediction_failed", n=len(X), error=str(exc), exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "Batch prediction failed due to an internal error."
+                if kind
+                else "Prediction failed due to an internal error."
+            ),
+        )
+
+
+def _record(request_id: str, features: ChurnFeatures, prediction: int, proba: float, version: str) -> dict:
+    return {
+        "request_id": request_id,
+        "features": features.model_dump(mode="json"),
+        "prediction": prediction,
+        "probability": proba,
+        "model_version": version,
     }
-    row = {k: v.value if hasattr(v, "value") else v for k, v in row.items()}
-    return pd.DataFrame([row])
 
 
 @router.post(
@@ -56,74 +108,29 @@ def _features_to_dataframe(features: ChurnFeatures) -> pd.DataFrame:
         500: {"description": "Internal prediction error"},
     },
 )
-async def predict(
+def predict(
     features: ChurnFeatures,
+    background_tasks: BackgroundTasks,
     loader: Annotated[ModelLoader, Depends(_get_loader)],
-    request: Request,
 ) -> PredictionResponse:
     request_id = str(uuid.uuid4())
-    threshold = 0.5
-    info = loader.get_info()
-    if info and "threshold" in info.params:
-        threshold = float(info.params["threshold"])
 
     ACTIVE_REQUESTS.inc()
     start = time.perf_counter()
 
     try:
-        try:
-            model = loader.get_model()
-        except ModelLoadError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=str(exc.message),
-            )
+        snapshot = _get_snapshot(loader)
+        info = snapshot.info
+        threshold = snapshot.threshold
 
-        X = _features_to_dataframe(features)
-
-        # Apply the fitted preprocessor (impute + scale + OHE) before inference.
-        # If no preprocessor artifact was found at load time, fall back to raw
-        # features and rely on the warning already logged by the model loader.
-        preprocessor = loader.get_preprocessor()
-        if preprocessor is not None:
-            try:
-                X = preprocessor.transform(X)
-            except Exception as exc:
-                ERRORS_TOTAL.labels(error_type="preprocessing_error").inc()
-                logger.error(
-                    "preprocessing_failed",
-                    request_id=request_id,
-                    error=str(exc),
-                    exc_info=True,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Feature preprocessing failed.",
-                )
-
-        try:
-            proba = float(model.predict_proba(X)[0, 1])
-        except Exception as exc:
-            ERRORS_TOTAL.labels(error_type="prediction_error").inc()
-            logger.error(
-                "prediction_failed",
-                request_id=request_id,
-                error=str(exc),
-                exc_info=True,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Prediction failed due to an internal error.",
-            )
-
+        proba = float(_score(snapshot, _to_dataframe([features]))[0])
         prediction = int(proba >= threshold)
-        model_version = info.version if info else "unknown"
 
         PREDICTIONS_TOTAL.labels(
             prediction_label=str(prediction),
-            model_version=model_version,
+            model_version=info.version,
         ).inc()
-        PREDICTION_PROBABILITY.labels(model_version=model_version).observe(proba)
+        PREDICTION_PROBABILITY.labels(model_version=info.version).observe(proba)
 
         latency = time.perf_counter() - start
         REQUEST_LATENCY.labels(endpoint="/predict").observe(latency)
@@ -133,40 +140,26 @@ async def predict(
             request_id=request_id,
             prediction=prediction,
             probability=round(proba, 4),
-            model_version=model_version,
+            model_version=info.version,
             latency_ms=round(latency * 1000, 2),
         )
 
-        try:
-            from src.data_logger.logger import log_prediction_async
-            await log_prediction_async(
-                request_id=request_id,
-                features=features.model_dump(),
-                prediction=prediction,
-                probability=proba,
-                model_version=model_version,
-            )
-        except Exception as log_exc:
-            logger.warning(
-                "prediction_logging_failed",
-                request_id=request_id,
-                error=str(log_exc),
-            )
+        # Runs after the response is sent: a slow or unavailable database adds no latency.
+        background_tasks.add_task(
+            log_predictions_safe,
+            [_record(request_id, features, prediction, proba, info.version)],
+        )
 
         return PredictionResponse(
             prediction=prediction,
             probability=round(proba, 6),
-            model_version=model_version,
-            model_stage=info.stage if info else "unknown",
+            model_version=info.version,
+            model_stage=info.stage,
             threshold=threshold,
         )
 
     finally:
         ACTIVE_REQUESTS.dec()
-
-
-
-_BATCH_MAX_SIZE = 500
 
 
 @router.post(
@@ -186,8 +179,9 @@ _BATCH_MAX_SIZE = 500
         500: {"description": "Internal prediction error"},
     },
 )
-async def predict_batch(
+def predict_batch(
     body: BatchPredictionRequest,
+    background_tasks: BackgroundTasks,
     loader: Annotated[ModelLoader, Depends(_get_loader)],
 ) -> BatchPredictionResponse:
     n = len(body.requests)
@@ -202,92 +196,43 @@ async def predict_batch(
     batch_start = time.perf_counter()
 
     try:
-        try:
-            model = loader.get_model()
-        except ModelLoadError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=str(exc.message),
-            )
+        snapshot = _get_snapshot(loader)
+        info = snapshot.info
+        threshold = snapshot.threshold
 
-        info = loader.get_info()
-        threshold = 0.5
-        if info and "threshold" in info.params:
-            threshold = float(info.params["threshold"])
-
-        model_version = info.version if info else "unknown"
-        model_stage   = info.stage   if info else "unknown"
-
-        rows = []
-        for feat in body.requests:
-            row = {
-                field: getattr(feat, field)
-                for field in feat.model_fields
-            }
-            row = {k: v.value if hasattr(v, "value") else v for k, v in row.items()}
-            rows.append(row)
-
-        X = pd.DataFrame(rows)
-
-        # Apply the fitted preprocessor before batch inference.
-        preprocessor = loader.get_preprocessor()
-        if preprocessor is not None:
-            try:
-                X = preprocessor.transform(X)
-            except Exception as exc:
-                ERRORS_TOTAL.labels(error_type="batch_preprocessing_error").inc()
-                logger.error("batch_preprocessing_failed", n=n, error=str(exc), exc_info=True)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Batch feature preprocessing failed.",
-                )
-
-        try:
-            probas = model.predict_proba(X)[:, 1]
-        except Exception as exc:
+        probas = _score(snapshot, _to_dataframe(body.requests), kind="batch_")
+        if len(probas) != n:
+            # zip() would otherwise silently truncate the response.
             ERRORS_TOTAL.labels(error_type="batch_prediction_error").inc()
-            logger.error("batch_prediction_failed", n=n, error=str(exc), exc_info=True)
+            logger.error("batch_prediction_count_mismatch", expected=n, got=len(probas))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Batch prediction failed due to an internal error.",
             )
 
         results: list[PredictionResponse] = []
-        for i, (feat, proba) in enumerate(zip(body.requests, probas)):
+        records: list[dict] = []
+        for feat, proba in zip(body.requests, probas):
             proba_f = float(proba)
             prediction = int(proba_f >= threshold)
-            request_id = str(uuid.uuid4())
 
             PREDICTIONS_TOTAL.labels(
                 prediction_label=str(prediction),
-                model_version=model_version,
+                model_version=info.version,
             ).inc()
-            PREDICTION_PROBABILITY.labels(model_version=model_version).observe(proba_f)
+            PREDICTION_PROBABILITY.labels(model_version=info.version).observe(proba_f)
 
-            try:
-                from src.data_logger.logger import log_prediction_async
-                await log_prediction_async(
-                    request_id=request_id,
-                    features=feat.model_dump(),
-                    prediction=prediction,
-                    probability=proba_f,
-                    model_version=model_version,
-                )
-            except Exception as log_exc:
-                logger.warning(
-                    "batch_item_logging_failed",
-                    item_index=i,
-                    request_id=request_id,
-                    error=str(log_exc),
-                )
-
+            records.append(_record(str(uuid.uuid4()), feat, prediction, proba_f, info.version))
             results.append(PredictionResponse(
                 prediction=prediction,
                 probability=round(proba_f, 6),
-                model_version=model_version,
-                model_stage=model_stage,
+                model_version=info.version,
+                model_stage=info.stage,
                 threshold=threshold,
             ))
+
+        # One INSERT for the whole batch, after the response is sent.
+        background_tasks.add_task(log_predictions_safe, records)
 
         batch_latency = time.perf_counter() - batch_start
         REQUEST_LATENCY.labels(endpoint="/predict/batch").observe(batch_latency)
@@ -295,14 +240,14 @@ async def predict_batch(
         logger.info(
             "batch_prediction_served",
             n=n,
-            model_version=model_version,
+            model_version=info.version,
             latency_ms=round(batch_latency * 1000, 2),
         )
 
         return BatchPredictionResponse(
             predictions=results,
             count=n,
-            model_version=model_version,
+            model_version=info.version,
         )
 
     finally:

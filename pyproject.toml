@@ -19,11 +19,21 @@ filterwarnings = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-select = ["E", "F", "I", "N", "W", "UP"]
-ignore = ["E501"]
 
-[tool.ruff.isort]
-known-first-party = ["src"]
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = [
+    "E501",  # line length is not enforced
+    # Uppercase X / X_train / X_test is the scikit-learn convention for feature matrices.
+    "N803",
+    "N806",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "tests"]
+# Top-level ./mlflow and ./airflow hold Dockerfiles, which makes ruff mistake these
+# packages for first-party code.
+known-third-party = ["mlflow", "airflow"]
 
 [tool.mypy]
 python_version = "3.10"

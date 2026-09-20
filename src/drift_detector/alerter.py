@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -55,7 +55,7 @@ def send_slack_alert(drift_metrics: dict[str, Any], config: dict[str, Any]) -> N
     if not alerting_cfg.get("slack_enabled", False):
         return
 
-    webhook_url: Optional[str] = alerting_cfg.get("slack_webhook_url", "").strip()
+    webhook_url: str | None = alerting_cfg.get("slack_webhook_url", "").strip()
     if not webhook_url:
         logger.debug("slack_alert_skipped_no_webhook_url_configured")
         return

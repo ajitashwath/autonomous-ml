@@ -6,7 +6,6 @@ from typing import Any
 
 import numpy as np
 import xgboost as xgb
-from sklearn.pipeline import Pipeline
 
 from src.core.exceptions import TrainingError
 from src.core.logging import get_logger

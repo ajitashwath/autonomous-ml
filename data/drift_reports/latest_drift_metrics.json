@@ -1,0 +1,7 @@
+{
+  "drift_share": 0.5,
+  "dataset_drift": false,
+  "drifted_features": 0,
+  "analyzed_rows": 10,
+  "report_path": "data\\drift_reports\\latest_drift_report.html"
+}

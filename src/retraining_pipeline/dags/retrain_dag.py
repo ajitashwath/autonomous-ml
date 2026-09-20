@@ -1,9 +1,12 @@
-
-
+import os
 from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.bash import BashOperator
+
+# The ML code runs in a dedicated virtualenv (see airflow/Dockerfile), not Airflow's own Python.
+ML_PYTHON = os.environ.get("ML_PYTHON", "/home/airflow/ml-venv/bin/python")
+APP_DIR = "/app"
 
 default_args = {
     "owner": "automlops_team",
@@ -19,26 +22,26 @@ with DAG(
     dag_id="retrain_pipeline",
     default_args=default_args,
     description="Triggered by data drift to retrain, validate, and promote the churn model.",
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     tags=["automlops", "retraining", "self-healing"],
     max_active_runs=1,
 ) as dag:
 
+    # cwd matters: configs reference data/ paths relative to the app root.
     train_model = BashOperator(
         task_id="train_model",
-        bash_command="python -m src.training_service.train --config /app/configs/training.yaml",
-        env={
-            "PYTHONPATH": "/app",
-            "DRIFT_METRICS": "{{ dag_run.conf.get('drift_metrics', '{}') }}",
-        },
+        bash_command=f"{ML_PYTHON} -m src.training_service.train --config configs/training.yaml",
+        cwd=APP_DIR,
+        env={"PYTHONPATH": APP_DIR},
         append_env=True,
     )
 
     validate_and_deploy = BashOperator(
         task_id="validate_and_deploy",
-        bash_command="python -m src.validation_gate.gate --config /app/configs/validation.yaml",
-        env={"PYTHONPATH": "/app"},
+        bash_command=f"{ML_PYTHON} -m src.validation_gate.gate --config configs/validation.yaml",
+        cwd=APP_DIR,
+        env={"PYTHONPATH": APP_DIR},
         append_env=True,
     )
 

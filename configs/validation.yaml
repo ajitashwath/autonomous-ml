@@ -9,6 +9,11 @@ gate:
     precision: 0.50
   log_to_db: true
 
+evaluation:
+  # Labelled data (raw features + target) both models are scored on.
+  holdout_path: "data/reference/holdout.parquet"
+  target_column: "Churn"
+
 reference:
   data_path: "data/reference/reference.parquet"
 

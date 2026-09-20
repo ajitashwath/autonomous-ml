@@ -1,13 +1,8 @@
-
-
 from __future__ import annotations
 
-import pickle
 import tempfile
 import threading
-import time
-from pathlib import Path
-from typing import Optional
+from dataclasses import dataclass
 
 import mlflow
 import mlflow.artifacts
@@ -20,23 +15,104 @@ from src.core.exceptions import ModelLoadError, ModelNotFoundError
 from src.core.logging import get_logger
 from src.inference_api.metrics import MODEL_INFO, MODEL_LOAD_TOTAL
 from src.model_registry.registry import ModelInfo, ModelRegistry
+from src.training_service.preprocessor import load_preprocessor
 
 logger = get_logger(__name__)
 
 POLL_INTERVAL_SECONDS = 60
+PREPROCESSOR_ARTIFACT = "preprocessor/preprocessor.pkl"
+
+
+@dataclass(frozen=True)
+class ModelSnapshot:
+    """A model, the preprocessor it was trained with, and its registry metadata.
+
+    Always replaced as a whole, never mutated. A request that takes one snapshot therefore
+    sees a consistent trio even if a hot-swap happens while it is being served.
+    """
+
+    model: xgb.XGBClassifier
+    preprocessor: ColumnTransformer
+    info: ModelInfo
+
+    @property
+    def threshold(self) -> float:
+        try:
+            return float(self.info.params.get("threshold", 0.5))
+        except (TypeError, ValueError):
+            return 0.5
 
 
 class ModelLoader:
 
     def __init__(self) -> None:
-        self._model: Optional[xgb.XGBClassifier] = None
-        self._preprocessor: Optional[ColumnTransformer] = None
-        self._info:  Optional[ModelInfo] = None
-        self._lock   = threading.RLock()
+        self._snapshot: ModelSnapshot | None = None
+        self._publish_lock = threading.Lock()
         self._registry = ModelRegistry()
         self._settings = get_settings()
         self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
 
+    # ------------------------------------------------------------------ reads
+
+    def current(self) -> ModelSnapshot | None:
+        # A single attribute read is atomic, so readers need no lock.
+        return self._snapshot
+
+    def get_snapshot(self) -> ModelSnapshot:
+        snapshot = self._snapshot
+        if snapshot is None:
+            raise ModelLoadError("Model is not loaded. Check startup logs.")
+        return snapshot
+
+    def get_info(self) -> ModelInfo | None:
+        snapshot = self._snapshot
+        return snapshot.info if snapshot else None
+
+    def is_loaded(self) -> bool:
+        return self._snapshot is not None
+
+    # ---------------------------------------------------------------- loading
+
+    def _build_snapshot(self, info: ModelInfo) -> ModelSnapshot:
+        """Load exactly the version described by `info`; raise rather than degrade."""
+        # Pinned to the version so a promotion between "which version?" and "load it"
+        # cannot leave `info` describing a different model than the one loaded.
+        model_uri = self._registry.get_version_uri(info.version)
+        try:
+            model = mlflow.xgboost.load_model(model_uri)
+        except Exception as exc:
+            raise ModelLoadError(
+                f"Failed to load model from URI '{model_uri}': {exc}",
+                details={"model_uri": model_uri, "version": info.version},
+            ) from exc
+
+        preprocessor = self._load_preprocessor(info.run_id, info.version)
+        return ModelSnapshot(model=model, preprocessor=preprocessor, info=info)
+
+    def _load_preprocessor(self, run_id: str, version: str) -> ColumnTransformer:
+        # Serving without the fitted preprocessor would feed raw features to a model trained
+        # on transformed ones. That produces wrong predictions or errors, so it is refused.
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                local_path = mlflow.artifacts.download_artifacts(
+                    run_id=run_id, artifact_path=PREPROCESSOR_ARTIFACT, dst_path=tmp_dir
+                )
+                preprocessor = load_preprocessor(local_path)
+        except Exception as exc:
+            raise ModelLoadError(
+                f"Preprocessor artifact for model version {version} could not be loaded: {exc}",
+                details={"run_id": run_id, "version": version, "artifact": PREPROCESSOR_ARTIFACT},
+            ) from exc
+        return preprocessor
+
+    def _publish(self, snapshot: ModelSnapshot) -> None:
+        with self._publish_lock:
+            self._snapshot = snapshot
+        # Only the live version is reported; older labels must not linger at 1.
+        MODEL_INFO.clear()
+        MODEL_INFO.labels(model_version=snapshot.info.version, model_stage=snapshot.info.stage).set(1)
+        MODEL_LOAD_TOTAL.labels(status="success").inc()
 
     def load(self) -> None:
         stage = self._settings.inference_model_stage
@@ -52,29 +128,13 @@ class ModelLoader:
                 details={"stage": stage},
             ) from exc
 
-        model_uri = self._registry.get_model_uri(stage=stage)
         try:
-            model = mlflow.xgboost.load_model(model_uri)
-        except Exception as exc:
+            snapshot = self._build_snapshot(info)
+        except ModelLoadError:
             MODEL_LOAD_TOTAL.labels(status="failure").inc()
-            raise ModelLoadError(
-                f"Failed to load model from URI '{model_uri}': {exc}",
-                details={"model_uri": model_uri, "version": info.version},
-            ) from exc
+            raise
 
-        preprocessor = self._load_preprocessor(info.run_id)
-
-        with self._lock:
-            self._model = model
-            self._preprocessor = preprocessor
-            self._info  = info
-
-        MODEL_INFO.labels(
-            model_version=info.version,
-            model_stage=info.stage,
-        ).set(1)
-        MODEL_LOAD_TOTAL.labels(status="success").inc()
-
+        self._publish(snapshot)
         logger.info(
             "model_loaded",
             version=info.version,
@@ -84,115 +144,64 @@ class ModelLoader:
 
     def _try_hot_swap(self) -> None:
         try:
-            latest_info = self._registry.get_model_info(
-                stage=self._settings.inference_model_stage
-            )
+            latest = self._registry.get_model_info(stage=self._settings.inference_model_stage)
         except Exception as exc:
             logger.warning("hot_swap_registry_check_failed", error=str(exc))
             return
 
-        with self._lock:
-            current_version = self._info.version if self._info else None
-
-        if latest_info.version == current_version:
+        current = self._snapshot
+        current_version = current.info.version if current else None
+        if latest.version == current_version:
             return
 
         logger.info(
             "hot_swap_triggered",
             current_version=current_version,
-            new_version=latest_info.version,
-        )
-
-        model_uri = self._registry.get_model_uri(
-            stage=self._settings.inference_model_stage
+            new_version=latest.version,
         )
         try:
-            new_model = mlflow.xgboost.load_model(model_uri)
-        except Exception as exc:
-            logger.error("hot_swap_load_failed", error=str(exc))
+            snapshot = self._build_snapshot(latest)
+        except ModelLoadError as exc:
+            # The running model keeps serving; the next poll retries.
+            logger.error("hot_swap_load_failed", error=exc.message, details=exc.details)
             MODEL_LOAD_TOTAL.labels(status="failure").inc()
             return
 
-        new_preprocessor = self._load_preprocessor(latest_info.run_id)
+        self._publish(snapshot)
+        logger.info("hot_swap_complete", new_version=latest.version)
 
-        with self._lock:
-            self._model = new_model
-            self._preprocessor = new_preprocessor
-            self._info  = latest_info
-
-        MODEL_INFO.labels(
-            model_version=latest_info.version,
-            model_stage=latest_info.stage,
-        ).set(1)
-        MODEL_LOAD_TOTAL.labels(status="success").inc()
-        logger.info("hot_swap_complete", new_version=latest_info.version)
-
+    # ---------------------------------------------------------------- polling
 
     def start_polling(self) -> None:
-        thread = threading.Thread(
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
             target=self._poll_loop,
             name="model-hot-swap-poller",
             daemon=True,
         )
-        thread.start()
+        self._thread.start()
         logger.info("model_polling_started", interval_seconds=POLL_INTERVAL_SECONDS)
 
     def _poll_loop(self) -> None:
         while not self._stop_event.is_set():
             self._stop_event.wait(timeout=POLL_INTERVAL_SECONDS)
             if not self._stop_event.is_set():
-                self._try_hot_swap()
+                try:
+                    self._try_hot_swap()
+                except Exception as exc:
+                    # An unexpected error must not kill the poller and freeze hot-swap forever.
+                    logger.error("hot_swap_unexpected_error", error=str(exc), exc_info=True)
 
     def stop_polling(self) -> None:
         self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
         logger.info("model_polling_stopped")
 
 
-    def get_model(self) -> xgb.XGBClassifier:
-        with self._lock:
-            if self._model is None:
-                raise ModelLoadError("Model is not loaded. Check startup logs.")
-            return self._model
-
-    def get_info(self) -> Optional[ModelInfo]:
-        with self._lock:
-            return self._info
-
-    def get_preprocessor(self) -> Optional[ColumnTransformer]:
-        with self._lock:
-            return self._preprocessor
-
-    def is_loaded(self) -> bool:
-        with self._lock:
-            return self._model is not None
-
-    def _load_preprocessor(self, run_id: str) -> Optional[ColumnTransformer]:
-        """Download the fitted preprocessor artifact from MLflow.
-        Returns None with a warning if the artifact is absent (e.g. old runs)."""
-        artifact_path = "preprocessor/preprocessor.pkl"
-        try:
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                local_path = mlflow.artifacts.download_artifacts(
-                    run_id=run_id,
-                    artifact_path=artifact_path,
-                    dst_path=tmp_dir,
-                )
-                with open(local_path, "rb") as f:
-                    preprocessor = pickle.load(f)
-            logger.info("preprocessor_loaded", run_id=run_id)
-            return preprocessor
-        except Exception as exc:
-            logger.warning(
-                "preprocessor_artifact_not_found",
-                run_id=run_id,
-                artifact_path=artifact_path,
-                error=str(exc),
-                action="Inference will pass raw features to the model — predictions may be incorrect.",
-            )
-            return None
-
-
-_loader: Optional[ModelLoader] = None
+_loader: ModelLoader | None = None
 
 
 def get_model_loader() -> ModelLoader:

@@ -4,18 +4,16 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
-
-import mlflow
-
-from sqlalchemy import select, desc
-from src.core.db import db_session
-from src.data_logger.models import PredictionLog
+from typing import Any
 
 import httpx
+import mlflow
+from sqlalchemy import desc, select
 
 from src.core.config import get_settings
+from src.core.db import db_session
 from src.core.logging import get_logger
+from src.data_logger.models import PredictionLog
 
 logger = get_logger(__name__)
 
@@ -45,12 +43,10 @@ def fetch_model_registry() -> dict[str, Any]:
     result: dict[str, Any] = {}
     try:
         from src.model_registry.registry import (
-            ModelRegistry,
             STAGE_PRODUCTION,
             STAGE_STAGING,
-            ModelNotFoundError,
+            ModelRegistry,
         )
-        from src.core.exceptions import ModelNotFoundError
 
         settings = get_settings()
         mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
@@ -90,13 +86,13 @@ def fetch_recent_logs(n: int = 5) -> list[dict] | str:
             logs = session.scalars(stmt).all()
             return [
                 {
-                    "request_id": l.request_id[:8] + "…",
-                    "prediction": l.prediction,
-                    "probability": round(l.probability, 3),
-                    "model_version": l.model_version,
-                    "created_at": str(l.created_at)[:19] if l.created_at else "N/A",
+                    "request_id": entry.request_id[:8] + "…",
+                    "prediction": entry.prediction,
+                    "probability": round(entry.probability, 3),
+                    "model_version": entry.model_version,
+                    "created_at": str(entry.created_at)[:19] if entry.created_at else "N/A",
                 }
-                for l in logs
+                for entry in logs
             ]
     except Exception as exc:
         return f"UNAVAILABLE: {exc}"
@@ -175,7 +171,8 @@ def show_drift(data: dict | str) -> None:
 
     drift_share = data.get("drift_share", "N/A")
     if isinstance(drift_share, float):
-        drift_colour = _RED if drift_share >= 0.3 else _GREEN
+        threshold = data.get("drift_share_threshold", 0.3)
+        drift_colour = _RED if drift_share >= threshold else _GREEN
         ds_str = f"{drift_share:.4f}"
     else:
         drift_colour = _YELLOW
@@ -184,7 +181,7 @@ def show_drift(data: dict | str) -> None:
     row("Drift Share", ds_str, drift_colour)
     row("Drifted Features", str(data.get("drifted_features", "N/A")))
     row("Analyzed Rows", str(data.get("analyzed_rows", "N/A")))
-    row("Report", str(data.get("report_path", "N/A")), _DIM)
+    row("Report", str(data.get("report_path") or "N/A"), _DIM)
 
 
 def print_status() -> None:
